@@ -8,7 +8,6 @@ This project uses `uv` for extremely fast and reproducible dependency management
 ### Prerequisites
 
 * [uv](https://docs.astral.sh/uv/getting-started/installation/) installed on your system.
-* NVIDIA GPU with Drivers (for CUDA 11.8 support).
 
 ### Quick Start
 
