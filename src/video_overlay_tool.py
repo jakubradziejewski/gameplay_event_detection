@@ -1,17 +1,19 @@
 import cv2
 import numpy as np
 from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Optional, Dict
 import json
 
 
 class VideoOverlayTool:
-    """Add board detection visualization to video from JSON results"""
+    """Add board detection visualization with 8x6 grid"""
     
     def __init__(self, video_path: str, json_path: str):
         self.video_path = Path(video_path)
         self.json_path = Path(json_path)
         self.detection_data = None
+        self.grid_cols = 8  # Horizontal
+        self.grid_rows = 6  # Vertical
         
     def load_json(self) -> bool:
         """Load detection results from JSON"""
@@ -25,6 +27,7 @@ class VideoOverlayTool:
         print(f"✓ Loaded detection data: {self.json_path.name}")
         print(f"  Total frames: {self.detection_data['summary']['total_frames']}")
         print(f"  Detection rate: {self.detection_data['summary']['detection_rate']*100:.1f}%")
+        print(f"  Grid: {self.grid_cols}x{self.grid_rows} (rectangular cells)")
         
         return True
     
@@ -32,9 +35,10 @@ class VideoOverlayTool:
                            show_corners: bool = True,
                            show_grid: bool = True,
                            show_stats: bool = True,
+                           show_cell_labels: bool = False,
                            color: tuple = (0, 255, 0),
                            thickness: int = 3):
-        """Create video with detection overlay"""
+        """Create video with 8x6 grid overlay"""
         
         if not self.load_json():
             return
@@ -44,18 +48,16 @@ class VideoOverlayTool:
             print(f"✗ Failed to open video: {self.video_path}")
             return
         
-        # Video properties
         fps = int(cap.get(cv2.CAP_PROP_FPS))
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         
-        # Setup output video
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
         
         print(f"\n{'='*60}")
-        print(f"CREATING VISUALIZATION")
+        print(f"CREATING VISUALIZATION (8x6 GRID)")
         print(f"{'='*60}")
         print(f"Input: {self.video_path.name}")
         print(f"Output: {output_path}")
@@ -69,7 +71,6 @@ class VideoOverlayTool:
             if not ret:
                 break
             
-            # Get detection data for this frame
             if frame_idx < len(self.detection_data['frames']):
                 frame_data = self.detection_data['frames'][frame_idx]
                 
@@ -91,18 +92,18 @@ class VideoOverlayTool:
                                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, 
                                       (255, 255, 255), 2)
                     
-                    # Draw grid overlay (if board detected)
+                    # Draw 8x6 grid
                     if show_grid:
-                        self._draw_grid(frame, corners, color=(0, 255, 255))
+                        self._draw_8x6_grid(frame, corners, 
+                                          show_labels=show_cell_labels,
+                                          color=(0, 255, 255))
                     
-                    # Status indicator
                     status_color = (0, 255, 0)
-                    status_text = "BOARD DETECTED"
+                    status_text = "INNER BOARD DETECTED"
                 else:
                     status_color = (0, 0, 255)
                     status_text = "NO DETECTION"
                 
-                # Show stats overlay
                 if show_stats:
                     self._draw_stats(frame, frame_idx + 1, total_frames, 
                                    status_text, status_color,
@@ -111,7 +112,6 @@ class VideoOverlayTool:
             out.write(frame)
             frame_idx += 1
             
-            # Progress
             if frame_idx % 100 == 0:
                 progress = (frame_idx / total_frames) * 100
                 print(f"Progress: {frame_idx}/{total_frames} ({progress:.1f}%)")
@@ -125,92 +125,128 @@ class VideoOverlayTool:
         print(f"  Output: {output_path}")
         print(f"{'='*60}\n")
     
-    def _draw_grid(self, frame: np.ndarray, corners: np.ndarray, 
-                   grid_size: int = 8, color: tuple = (0, 255, 255)):
-        """Draw grid overlay on detected board"""
+    def _draw_8x6_grid(self, frame: np.ndarray, corners: np.ndarray,
+                       show_labels: bool = False, color: tuple = (0, 255, 255)):
+        """Draw 8x6 grid (8 columns, 6 rows) on detected board"""
         
-        # Define destination points for grid
+        # Define grid dimensions
+        grid_width = 800
+        grid_height = 600  # 6 rows instead of 8
+        
+        # Destination corners for warping
         dst_corners = np.array([
             [0, 0],
-            [800, 0],
-            [800, 800],
-            [0, 800]
+            [grid_width, 0],
+            [grid_width, grid_height],
+            [0, grid_height]
         ], dtype=np.float32)
         
         # Get perspective transform
         M = cv2.getPerspectiveTransform(dst_corners, corners)
         
-        # Draw vertical and horizontal lines
-        step = 800 // grid_size
+        # Calculate cell dimensions
+        cell_width = grid_width / self.grid_cols
+        cell_height = grid_height / self.grid_rows
         
-        for i in range(1, grid_size):
-            # Vertical lines
-            pt1 = np.array([[i * step, 0]], dtype=np.float32)
-            pt2 = np.array([[i * step, 800]], dtype=np.float32)
+        # Draw vertical lines (8 columns = 9 lines)
+        for i in range(self.grid_cols + 1):
+            x = i * cell_width
+            pt1 = np.array([[x, 0]], dtype=np.float32)
+            pt2 = np.array([[x, grid_height]], dtype=np.float32)
             
             pt1_t = cv2.perspectiveTransform(pt1.reshape(1, 1, 2), M)[0][0]
             pt2_t = cv2.perspectiveTransform(pt2.reshape(1, 1, 2), M)[0][0]
             
+            # Thicker lines for borders
+            line_thickness = 2 if i == 0 or i == self.grid_cols else 1
             cv2.line(frame, tuple(pt1_t.astype(int)), 
-                    tuple(pt2_t.astype(int)), color, 1, cv2.LINE_AA)
-            
-            # Horizontal lines
-            pt1 = np.array([[0, i * step]], dtype=np.float32)
-            pt2 = np.array([[800, i * step]], dtype=np.float32)
+                    tuple(pt2_t.astype(int)), color, line_thickness, cv2.LINE_AA)
+        
+        # Draw horizontal lines (6 rows = 7 lines)
+        for i in range(self.grid_rows + 1):
+            y = i * cell_height
+            pt1 = np.array([[0, y]], dtype=np.float32)
+            pt2 = np.array([[grid_width, y]], dtype=np.float32)
             
             pt1_t = cv2.perspectiveTransform(pt1.reshape(1, 1, 2), M)[0][0]
             pt2_t = cv2.perspectiveTransform(pt2.reshape(1, 1, 2), M)[0][0]
             
+            line_thickness = 2 if i == 0 or i == self.grid_rows else 1
             cv2.line(frame, tuple(pt1_t.astype(int)), 
-                    tuple(pt2_t.astype(int)), color, 1, cv2.LINE_AA)
+                    tuple(pt2_t.astype(int)), color, line_thickness, cv2.LINE_AA)
+        
+        # Draw cell labels (A1-H6 style)
+        if show_labels:
+            for row in range(self.grid_rows):
+                for col in range(self.grid_cols):
+                    # Calculate cell center
+                    center_x = (col + 0.5) * cell_width
+                    center_y = (row + 0.5) * cell_height
+                    
+                    pt = np.array([[center_x, center_y]], dtype=np.float32)
+                    pt_t = cv2.perspectiveTransform(pt.reshape(1, 1, 2), M)[0][0]
+                    
+                    # Label as A1, B1, etc.
+                    label = f"{chr(65 + col)}{row + 1}"
+                    cv2.putText(frame, label, tuple(pt_t.astype(int)),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
     
     def _draw_stats(self, frame: np.ndarray, current_frame: int, 
                     total_frames: int, status_text: str, 
                     status_color: tuple, summary: Dict):
         """Draw statistics overlay"""
         
-        # Semi-transparent background for stats
         overlay = frame.copy()
-        cv2.rectangle(overlay, (10, 10), (450, 140), (0, 0, 0), -1)
+        cv2.rectangle(overlay, (10, 10), (500, 170), (0, 0, 0), -1)
         cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
+        
+        y_pos = 35
+        line_height = 30
         
         # Frame info
         cv2.putText(frame, f"Frame: {current_frame}/{total_frames}", 
-                   (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                   (20, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        y_pos += line_height
         
+        # Progress
         progress = (current_frame / total_frames) * 100
         cv2.putText(frame, f"Progress: {progress:.1f}%", 
-                   (20, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                   (20, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        y_pos += line_height
         
-        # Detection status
+        # Status
         cv2.putText(frame, f"Status: {status_text}", 
-                   (20, 95), cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
+                   (20, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
+        y_pos += line_height
         
-        # Overall detection rate
+        # Detection rate
         rate = summary['detection_rate'] * 100
         cv2.putText(frame, f"Detection Rate: {rate:.1f}%", 
-                   (20, 125), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                   (20, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        y_pos += line_height
+        
+        # Grid info
+        cv2.putText(frame, f"Grid: 8x6 (Rectangular cells)", 
+                   (20, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
     
-    def create_side_by_side(self, output_path: str):
-        """Create side-by-side comparison (original | with overlay)"""
+    def create_side_by_side(self, output_path: str, show_labels: bool = False):
+        """Create side-by-side comparison"""
         
         if not self.load_json():
             return
         
         cap = cv2.VideoCapture(str(self.video_path))
         if not cap.isOpened():
-            print(f"✗ Failed to open video")
             return
         
         fps = int(cap.get(cv2.CAP_PROP_FPS))
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
-        # Output is double width
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = cv2.VideoWriter(output_path, fourcc, fps, (width * 2, height))
         
-        print(f"\nCreating side-by-side comparison...")
+        print(f"\nCreating side-by-side comparison (8x6 grid)...")
         
         frame_idx = 0
         
@@ -222,7 +258,6 @@ class VideoOverlayTool:
             original = frame.copy()
             annotated = frame.copy()
             
-            # Add detection overlay to right side
             if frame_idx < len(self.detection_data['frames']):
                 frame_data = self.detection_data['frames'][frame_idx]
                 
@@ -232,20 +267,17 @@ class VideoOverlayTool:
                     cv2.polylines(annotated, [corners.astype(np.int32)], 
                                 True, (0, 255, 0), 3)
                     
-                    # Draw corners
                     for corner in corners:
                         cv2.circle(annotated, tuple(corner.astype(int)), 
                                  8, (0, 0, 255), -1)
                     
-                    self._draw_grid(annotated, corners)
+                    self._draw_8x6_grid(annotated, corners, show_labels=show_labels)
             
-            # Add labels
             cv2.putText(original, "ORIGINAL", (20, 40),
                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-            cv2.putText(annotated, "DETECTED BOARD", (20, 40),
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            cv2.putText(annotated, "INNER BOARD (8x6)", (20, 40),
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
             
-            # Combine frames
             combined = np.hstack([original, annotated])
             out.write(combined)
             
@@ -259,9 +291,8 @@ class VideoOverlayTool:
         
         print(f"✓ Side-by-side video saved: {output_path}\n")
     
-    def extract_warped_boards(self, output_dir: str, 
-                             sample_rate: int = 30):
-        """Extract warped top-down view of detected boards"""
+    def extract_warped_boards(self, output_dir: str, sample_rate: int = 30):
+        """Extract warped 8x6 board views"""
         
         if not self.load_json():
             return
@@ -273,9 +304,8 @@ class VideoOverlayTool:
         if not cap.isOpened():
             return
         
-        print(f"\nExtracting warped board views...")
+        print(f"\nExtracting warped board views (8x6 aspect ratio)...")
         print(f"Sample rate: every {sample_rate} frames")
-        print(f"Output directory: {output_path}")
         
         frame_idx = 0
         saved_count = 0
@@ -285,7 +315,6 @@ class VideoOverlayTool:
             if not ret:
                 break
             
-            # Save every Nth frame
             if frame_idx % sample_rate == 0:
                 if frame_idx < len(self.detection_data['frames']):
                     frame_data = self.detection_data['frames'][frame_idx]
@@ -293,10 +322,9 @@ class VideoOverlayTool:
                     if frame_data['detected'] and frame_data['corners']:
                         corners = np.array(frame_data['corners'], dtype=np.float32)
                         
-                        # Warp to top-down view
-                        warped = self._warp_board(frame, corners)
+                        # Warp with 8:6 aspect ratio
+                        warped = self._warp_8x6(frame, corners)
                         
-                        # Save
                         output_file = output_path / f"board_frame_{frame_idx:05d}.jpg"
                         cv2.imwrite(str(output_file), warped)
                         saved_count += 1
@@ -305,102 +333,50 @@ class VideoOverlayTool:
         
         cap.release()
         
-        print(f"✓ Extracted {saved_count} warped board images\n")
+        print(f"✓ Extracted {saved_count} warped board images (800x600)\n")
     
-    def _warp_board(self, frame: np.ndarray, corners: np.ndarray, 
-                    size: int = 800) -> np.ndarray:
-        """Warp board to top-down view"""
+    def _warp_8x6(self, frame: np.ndarray, corners: np.ndarray) -> np.ndarray:
+        """Warp board to top-down view with 8:6 aspect ratio"""
+        
+        width = 800
+        height = 600  # Maintains 8:6 aspect ratio
         
         dst_corners = np.array([
             [0, 0],
-            [size-1, 0],
-            [size-1, size-1],
-            [0, size-1]
+            [width-1, 0],
+            [width-1, height-1],
+            [0, height-1]
         ], dtype=np.float32)
         
         M = cv2.getPerspectiveTransform(corners, dst_corners)
-        warped = cv2.warpPerspective(frame, M, (size, size))
+        warped = cv2.warpPerspective(frame, M, (width, height))
         
         return warped
 
 
-# CLI Tool
-def main():
-    import argparse
-    
-    parser = argparse.ArgumentParser(description='Add board detection overlay to video')
-    parser.add_argument('video', help='Input video file')
-    parser.add_argument('json', help='Detection JSON file')
-    parser.add_argument('-o', '--output', default='output_visualization.mp4',
-                       help='Output video file')
-    parser.add_argument('--mode', choices=['overlay', 'sidebyside', 'extract'], 
-                       default='overlay',
-                       help='Visualization mode')
-    parser.add_argument('--no-corners', action='store_true',
-                       help='Hide corner markers')
-    parser.add_argument('--no-grid', action='store_true',
-                       help='Hide grid overlay')
-    parser.add_argument('--no-stats', action='store_true',
-                       help='Hide statistics')
-    parser.add_argument('--color', default='0,255,0',
-                       help='Border color as R,G,B (default: 0,255,0)')
-    parser.add_argument('--thickness', type=int, default=3,
-                       help='Border thickness')
-    parser.add_argument('--extract-dir', default='extracted_boards',
-                       help='Directory for extracted boards')
-    parser.add_argument('--sample-rate', type=int, default=30,
-                       help='Sample rate for extraction (every N frames)')
-    
-    args = parser.parse_args()
-    
-    # Parse color
-    color = tuple(map(int, args.color.split(',')))
-    
-    # Create tool
-    tool = VideoOverlayTool(args.video, args.json)
-    
-    # Execute based on mode
-    if args.mode == 'overlay':
-        tool.create_visualization(
-            args.output,
-            show_corners=not args.no_corners,
-            show_grid=not args.no_grid,
-            show_stats=not args.no_stats,
-            color=color,
-            thickness=args.thickness
-        )
-    
-    elif args.mode == 'sidebyside':
-        tool.create_side_by_side(args.output)
-    
-    elif args.mode == 'extract':
-        tool.extract_warped_boards(args.extract_dir, args.sample_rate)
-
-
 if __name__ == "__main__":
-    # Example usage without CLI
     print("="*60)
-    print("VIDEO OVERLAY TOOL")
+    print("VIDEO OVERLAY TOOL - 8x6 GRID")
     print("="*60)
     
-    # Basic usage
     tool = VideoOverlayTool(
-        video_path="data/easy/1.mp4",
-        json_path="data/easy/1_board_detection.json"
+        video_path="data/easy/game_video.mp4",
+        json_path="data/easy/game_video_board_detection.json"
     )
     
-    # Create visualization with overlay
+    # Create visualization with 8x6 grid
     tool.create_visualization(
-        output_path="11.mp4",
+        output_path="game_with_8x6_grid.mp4",
         show_corners=True,
         show_grid=True,
         show_stats=True,
-        color=(0, 255, 0),  # Green
+        show_cell_labels=False,  # Set True to show A1-H6 labels
+        color=(0, 255, 0),
         thickness=3
     )
     
-    # Or create side-by-side comparison
-    # tool.create_side_by_side("output/comparison.mp4")
+    # Optional: side-by-side with cell labels
+    # tool.create_side_by_side("output/comparison_8x6.mp4", show_labels=True)
     
-    # Or extract warped board images
-    # tool.extract_warped_boards("output/boards", sample_rate=30)
+    # Optional: extract warped boards
+    # tool.extract_warped_boards("output/boards_8x6", sample_rate=30)
