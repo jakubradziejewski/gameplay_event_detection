@@ -57,7 +57,7 @@ class BoardDetector:
         # Check if area is reasonable
         area = cv2.contourArea(largest)
         frame_area = frame.shape[0] * frame.shape[1]
-        if area < frame_area * 0.2:  # At least 20% of frame
+        if area < frame_area * 0.15:  # At least 15% of frame
             print(f"⚠ Detected area too small: {area / frame_area * 100:.1f}% of frame")
             return None
         
@@ -359,11 +359,11 @@ class BoardDetector:
 
 # Usage
 if __name__ == "__main__":
-    detector = BoardDetector("data/easy/game_video.mp4")
+    detector = BoardDetector("data/hard/game_video.mp4")
     
     # Process video with brightness-based detection and adaptive grid
     results = detector.process_video(
-        output_path="output/board_detection_brightness.mp4",
+        output_path="output/board_detection_brightness_hard_inner.mp4",
         visualize=True,
         show_cell_labels=False,  # Set True to show A1-H6 labels
         save_brightness_debug=True,  # Creates brightness_mask_debug.jpg
