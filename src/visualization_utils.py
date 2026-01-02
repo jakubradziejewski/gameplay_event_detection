@@ -102,7 +102,7 @@ class VisualizationUtils:
         gray = detection_data['gray']
         blurred = detection_data['blurred']
         mask = detection_data['mask']
-        mask_closed = detection_data['mask_closed']
+        mask_closed = detection_data['mask_cleaned']
         mask_cleaned = detection_data['mask_cleaned']
         contours = detection_data['contours']
         largest = detection_data['largest']
@@ -147,7 +147,7 @@ class VisualizationUtils:
         
         # Step 5: After morphological closing
         step5 = cv2.cvtColor(mask_closed, cv2.COLOR_GRAY2BGR)
-        cv2.putText(step5, "5. Morph Close (7x7, x3)", (10, 30),
+        cv2.putText(step5, "no morphological closing", (10, 30),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
         cv2.putText(step5, "Fills holes", (10, 60),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
