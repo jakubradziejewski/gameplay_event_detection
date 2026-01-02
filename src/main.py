@@ -10,7 +10,7 @@ from board_detector import BoardDetector
 from visualization_utils import VisualizationUtils
 
 # Input video path
-VIDEO_PATH = "data/easy/game_video.mp4"
+VIDEO_PATH = "data/medium/game_medium.mp4"
 
 # Output settings
 OUTPUT_DIR = "output"
@@ -23,7 +23,7 @@ SAVE_DETECTION_STEPS = True  # Save step-by-step detection PNG
 SAVE_FILTER_ANALYSIS = True  # Save filter analysis PNG
 
 # Detection parameters
-BRIGHTNESS_THRESHOLD = 180    # Brightness threshold (lower for darker boards: 120-150)
+BRIGHTNESS_THRESHOLD = 190    # Brightness threshold (lower for darker boards: 120-150)
 GRID_COLS = 8                 # Number of grid columns
 GRID_ROWS = 6                 # Number of grid rows
 

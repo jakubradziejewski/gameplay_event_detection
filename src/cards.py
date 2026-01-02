@@ -34,16 +34,17 @@ class DetectionParams:
     solidity_threshold: float = 0.8
     
     # Card dimension reference (for splitting merged cards)
-    card_width: int = 100
+    card_width: int = 90
     card_height: int = 130
 
 def split_merged_cards(single_card_mask, rect, params):
     """
     Split a mask that contains multiple cards into individual card regions.
-    Returns a list of bounding boxes for individual cards.
+    Returns a list of tuples: (card_rect, original_width, original_height)
     """
     width, height = rect[1]
     angle = rect[2]
+    original_angle = angle
     
     # Normalize dimensions (width should be smaller, height larger for portrait cards)
     if width > height:
@@ -55,9 +56,10 @@ def split_merged_cards(single_card_mask, rect, params):
     cols = round(width / params.card_width)
     rows = round(height / params.card_height)
     
-    # If it's just a single card, return the original rect
+    # If it's just a single card, return with original dimensions
     if cols == 1 and rows == 1:
-        return [rect]
+        # Return original rect dimensions (before normalization)
+        return [(rect, rect[1][0], rect[1][1])]
     
     # Get the rotation matrix to align the card(s) horizontally
     center = rect[0]
@@ -70,10 +72,11 @@ def split_merged_cards(single_card_mask, rect, params):
     # Find the bounding box of the rotated region
     coords = cv2.findNonZero(rotated_mask)
     if coords is None:
-        return [rect]
+        return [(rect, rect[1][0], rect[1][1])]
     
     x, y, w_box, h_box = cv2.boundingRect(coords)
-    
+    if w_box == 0 or h_box == 0 or cols == 0 or rows == 0:
+            return [(rect, rect[1][0], rect[1][1])]
     # Calculate individual card dimensions within the grid
     card_w = w_box / cols
     card_h = h_box / rows
@@ -115,13 +118,15 @@ def split_merged_cards(single_card_mask, rect, params):
                     orig_center = cv2.transform(cell_center, inv_M)[0][0]
                     
                     # Create a rotated rect for this individual card
-                    split_rects.append((
+                    # Store the rect along with the ORIGINAL width and height (before rotation)
+                    card_rect = (
                         (orig_center[0], orig_center[1]),  # center
-                        (card_w, card_h),  # size
-                        angle - 90 if width > height else angle  # angle (undo normalization)
-                    ))
+                        (card_w, card_h),  # size (normalized)
+                        angle  # angle (normalized)
+                    )
+                    split_rects.append((card_rect, card_w, card_h))
     
-    return split_rects if split_rects else [rect]
+    return split_rects if split_rects else [(rect, rect[1][0], rect[1][1])]
 
 def process_gradient_detection():
     # 1. Setup
@@ -265,6 +270,9 @@ def process_gradient_detection():
     valid_cards = []
     vis_contours = frame.copy()
     
+    # Counter for unique card IDs
+    card_id = 1
+    
     # Loop through unique markers (skip 0=unknown, 1=background)
     unique_markers = np.unique(markers)
     
@@ -298,26 +306,30 @@ def process_gradient_detection():
             # Try to split this region into individual cards
             split_cards = split_merged_cards(single_card_mask, rect, params)
             
-            # Draw each split card
-            for card_rect in split_cards:
+            # Draw each split card with unique ID
+            for card_data in split_cards:
+                card_rect, orig_w, orig_h = card_data
+                
                 box = cv2.boxPoints(card_rect)
                 box = np.int32(box)
                 valid_cards.append(box)
                 cv2.drawContours(vis_contours, [box], 0, (0, 255, 0), 2)
                 
-                # Calculate and display dimensions
-                w, h = card_rect[1]
-                # Normalize to show portrait orientation
+                # Display dimensions - always show smaller value as width
+                w, h = orig_w, orig_h
                 if w > h:
                     w, h = h, w
                 dim_text = f"W:{int(w)} H:{int(h)}"
                 
-                # Draw center ID and dimensions
+                # Draw unique card ID and dimensions
                 center_x, center_y = int(card_rect[0][0]), int(card_rect[0][1])
-                cv2.putText(vis_contours, str(label), (center_x, center_y - 10), 
+                cv2.putText(vis_contours, f"#{card_id}", (center_x, center_y - 10), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
                 cv2.putText(vis_contours, dim_text, (center_x, center_y + 15), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+                
+                # Increment card ID for next card
+                card_id += 1
 
     cv2.imwrite(str(output_dir / "5_final_detections.png"), vis_contours)
     
