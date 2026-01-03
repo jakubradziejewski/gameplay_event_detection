@@ -365,6 +365,8 @@ class BoardDetector:
             print("4. Make sure the playable board area is significantly brighter than surroundings")
             return
         
+        self.board_history.append(inner)
+        
         self.inner_board = inner
         print("\n✓ Board detection calibrated")
         print(f"  Inner board corners: {inner.astype(int).tolist()}")
@@ -375,6 +377,12 @@ class BoardDetector:
         detected_count = 0
         
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+        # threshold for maximum sum of distances between frame corners and previous frames corners to decide that board detected in a frame is valid
+        init_threshold = 50
+        # if we lose track of board, with each frame we multiplt htreshold by this constant to find board back
+        threshold_multiplier = 1.01
+        detection_threshold = init_threshold
         
         while True:
             ret, frame = cap.read()
@@ -386,12 +394,22 @@ class BoardDetector:
             # Detect inner board
             inner_corners = self._detect_inner_from_brightness(
                 frame, 
-                brightness_threshold
+                debug=False
             )
             
             if inner_corners is not None:
                 detected_count += 1
-                inner_corners = self.smooth_detection(inner_corners)
+
+                last_corners_mean = np.mean(self.board_history, axis=0)
+                manhattan_dist_corners = np.sum(np.abs(inner_corners - last_corners_mean))
+                #print(np.sum(np.abs(inner_corners - last_corners_mean)))
+
+                if manhattan_dist_corners < detection_threshold:
+                    inner_corners = self.smooth_detection(inner_corners)
+                    detection_threshold = init_threshold
+                else:
+                    inner_corners = self.board_history[-1] if self.board_history else None
+                    detection_threshold *= threshold_multiplier
             else:
                 # Use last known position
                 inner_corners = self.board_history[-1] if self.board_history else None
