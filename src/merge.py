@@ -6,7 +6,7 @@ from pathlib import Path
 from dataclasses import dataclass
 
 # CONFIGURATION
-VIDEO_PATH = "data/hard/game_hard.mp4"
+VIDEO_PATH = "data/easy/game_easy.mp4"
 OUTPUT_DIR = "output_video"
 SAVE_VIDEO = True
 
@@ -34,42 +34,59 @@ class DetectionParams:
     solidity_threshold: float = 0.8
     
     # Card dimension reference
-    card_width: int = 100
-    card_height: int = 140
+    card_width: int = 110
+    card_height: int = 150
 
 class CardDetector:
     def __init__(self, params=None):
         self.params = params if params else DetectionParams()
     
     def split_merged_cards(self, single_card_mask, rect):
-        """Split a mask containing multiple cards into individual card regions."""
+        """
+        Split a mask containing AT MOST 2 cards (1x2 or 2x1).
+        Rejects anything larger than 2 cards.
+        """
         width, height = rect[1]
         angle = rect[2]
         
-        # DON'T normalize! Keep original dimensions as-is
-        # The rect already has the correct orientation from minAreaRect
+        # Test all possible configurations for 1 or 2 cards
+        # Portrait cards: 100w × 140h
+        # Landscape cards: 140w × 100h
         
-        # Determine grid size - check both orientations
-        # For portrait cards (100x140): check if width fits cards or height fits cards
-        cols_if_portrait = max(1, round(width / self.params.card_width))
-        rows_if_portrait = max(1, round(height / self.params.card_height))
+        configs = []
         
-        cols_if_landscape = max(1, round(width / self.params.card_height))
-        rows_if_landscape = max(1, round(height / self.params.card_width))
+        # Single portrait card
+        error_1p = abs(width - self.params.card_width) + abs(height - self.params.card_height)
+        configs.append((1, 1, error_1p, 'portrait'))
         
-        # Calculate how well each orientation fits
-        portrait_fit = abs(width - cols_if_portrait * self.params.card_width) + \
-                       abs(height - rows_if_portrait * self.params.card_height)
-        landscape_fit = abs(width - cols_if_landscape * self.params.card_height) + \
-                        abs(height - rows_if_landscape * self.params.card_width)
+        # Single landscape card
+        error_1l = abs(width - self.params.card_height) + abs(height - self.params.card_width)
+        configs.append((1, 1, error_1l, 'landscape'))
         
-        # Choose the orientation that fits better
-        if portrait_fit <= landscape_fit:
-            cols = cols_if_portrait
-            rows = rows_if_portrait
-        else:
-            cols = cols_if_landscape
-            rows = rows_if_landscape
+        # Two cards horizontally (2×1 portrait)
+        error_2h_p = abs(width - 2 * self.params.card_width) + abs(height - self.params.card_height)
+        configs.append((2, 1, error_2h_p, 'portrait'))
+        
+        # Two cards horizontally (2×1 landscape)
+        error_2h_l = abs(width - 2 * self.params.card_height) + abs(height - self.params.card_width)
+        configs.append((2, 1, error_2h_l, 'landscape'))
+        
+        # Two cards vertically (1×2 portrait)
+        error_2v_p = abs(width - self.params.card_width) + abs(height - 2 * self.params.card_height)
+        configs.append((1, 2, error_2v_p, 'portrait'))
+        
+        # Two cards vertically (1×2 landscape)
+        error_2v_l = abs(width - self.params.card_height) + abs(height - 2 * self.params.card_width)
+        configs.append((1, 2, error_2v_l, 'landscape'))
+        
+        # Find best fit
+        configs.sort(key=lambda x: x[2])  # Sort by error
+        cols, rows, best_error, orientation = configs[0]
+        
+        # If error is too large (>50 pixels total), this is probably noise or >2 cards
+        # Reject it
+        if best_error > 50:
+            return []  # Reject this region entirely
         
         # Single card - return as-is
         if cols == 1 and rows == 1:

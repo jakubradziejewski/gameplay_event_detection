@@ -7,7 +7,7 @@ from dataclasses import dataclass
 # ==========================================
 # CONFIGURATION
 # ==========================================
-VIDEO_PATH = "data/easy/game_video.mp4"  # Change this to your video path
+VIDEO_PATH = "data/easy/game_easy.mp4"  # Change this to your video path
 OUTPUT_DIR = "output_minimal_gradient"
 
 @dataclass
