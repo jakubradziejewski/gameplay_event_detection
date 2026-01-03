@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 from dataclasses import dataclass
+from typing import List, Tuple, Optional
 
 @dataclass
 class DetectionParams:
@@ -12,10 +13,27 @@ class DetectionParams:
     min_aspect: float = 0.6
     max_aspect: float = 3.0
     solidity_threshold: float = 0.8
+    # Battle detection parameters
+    battle_min_area: int = 17000  # ~2x card area
+    battle_max_area: int = 36000  # ~2x card area
+    battle_min_aspect: float = 0.3  # Wider aspect ratio (two cards side by side)
+    battle_max_aspect: float = 1.5
+
+@dataclass
+class Card:
+    box: np.ndarray
+    center: Tuple[float, float]
+    width: float
+    height: float
+    card_id: Optional[int] = None
+    is_battle: bool = False
 
 class CardDetector:
     def __init__(self, params=None):
         self.params = params or DetectionParams()
+        self.next_id = 1
+        self.tracked_cards = {}  # {card_id: (center, frame_count)}
+        self.id_timeout = 30  # frames before ID is released
 
     def detect_cards(self, frame):
         # 1. Pre-processing
@@ -54,8 +72,10 @@ class CardDetector:
         
         markers = cv2.watershed(frame, markers)
         
-        # 6. Final Extraction
-        valid_boxes = []
+        # 6. Extract both single cards and battle pairs
+        cards = []
+        battles = []
+        
         for label in np.unique(markers):
             if label <= 1: continue
             
@@ -72,9 +92,103 @@ class CardDetector:
                 if w == 0 or h == 0: continue
                 aspect = max(w, h) / min(w, h)
                 
-                if (self.params.min_area * 0.5 <= area <= self.params.max_area and 
-                    self.params.min_aspect <= aspect <= self.params.max_aspect):
+                # Check if it's a battle (wider rectangle, larger area)
+                if (self.params.battle_min_area <= area <= self.params.battle_max_area and 
+                    self.params.battle_min_aspect <= aspect <= self.params.battle_max_aspect):
                     box = cv2.boxPoints(rect)
-                    valid_boxes.append(np.int32(box))
+                    box = np.int32(box)
+                    center = rect[0]
                     
-        return valid_boxes
+                    battle = Card(
+                        box=box,
+                        center=center,
+                        width=w,
+                        height=h,
+                        is_battle=True
+                    )
+                    battles.append(battle)
+                    
+                # Check if it's a single card
+                elif (self.params.min_area * 0.5 <= area <= self.params.max_area and 
+                      self.params.min_aspect <= aspect <= self.params.max_aspect):
+                    box = cv2.boxPoints(rect)
+                    box = np.int32(box)
+                    center = rect[0]
+                    
+                    card = Card(
+                        box=box,
+                        center=center,
+                        width=w,
+                        height=h,
+                        is_battle=False
+                    )
+                    cards.append(card)
+        
+        # Remove single cards that overlap with battles
+        cards = self._remove_overlapping_cards(cards, battles)
+        
+        # Assign IDs only to single cards
+        self._assign_ids(cards)
+        
+        return cards, battles
+
+    def _remove_overlapping_cards(self, cards: List[Card], battles: List[Card]) -> List[Card]:
+        """Remove single cards that overlap with battle areas"""
+        non_overlapping = []
+        
+        for card in cards:
+            overlaps = False
+            for battle in battles:
+                # Check if card center is inside battle box
+                if cv2.pointPolygonTest(battle.box, card.center, False) >= 0:
+                    overlaps = True
+                    break
+                
+                # Check if battle center is inside card box
+                if cv2.pointPolygonTest(card.box, battle.center, False) >= 0:
+                    overlaps = True
+                    break
+            
+            if not overlaps:
+                non_overlapping.append(card)
+        
+        return non_overlapping
+
+    def _assign_ids(self, cards: List[Card]):
+        """Assign persistent IDs to detected cards"""
+        # Clean up old tracked cards
+        self.tracked_cards = {
+            cid: (center, count + 1) 
+            for cid, (center, count) in self.tracked_cards.items() 
+            if count < self.id_timeout
+        }
+        
+        # Match current cards to tracked cards
+        used_ids = set()
+        for card in cards:
+            best_match_id = None
+            best_distance = float('inf')
+            
+            for card_id, (tracked_center, _) in self.tracked_cards.items():
+                if card_id in used_ids:
+                    continue
+                    
+                distance = np.sqrt(
+                    (card.center[0] - tracked_center[0])**2 + 
+                    (card.center[1] - tracked_center[1])**2
+                )
+                
+                if distance < 100 and distance < best_distance:  # 100px threshold
+                    best_distance = distance
+                    best_match_id = card_id
+            
+            if best_match_id is not None:
+                card.card_id = best_match_id
+                used_ids.add(best_match_id)
+                self.tracked_cards[best_match_id] = (card.center, 0)
+            else:
+                # Assign new ID
+                card.card_id = self.next_id
+                self.next_id += 1
+                self.tracked_cards[card.card_id] = (card.center, 0)
+                used_ids.add(card.card_id)
