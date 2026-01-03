@@ -102,11 +102,11 @@ class VisualizationUtils:
         gray = detection_data['gray']
         blurred = detection_data['blurred']
         mask = detection_data['mask']
-        mask_closed = detection_data['mask_closed']
         mask_cleaned = detection_data['mask_cleaned']
         contours = detection_data['contours']
         largest = detection_data['largest']
-        corners = detection_data['corners']
+        corners_updated = detection_data['corners_updated']
+        corners_final = detection_data['corners_final']
         threshold = detection_data['threshold']
         area_percent = detection_data['area_percent']
         
@@ -145,44 +145,51 @@ class VisualizationUtils:
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
         steps.append(step4)
         
-        # Step 5: After morphological closing
-        step5 = cv2.cvtColor(mask_closed, cv2.COLOR_GRAY2BGR)
-        cv2.putText(step5, "5. Morph Close (7x7, x3)", (10, 30),
+        # Step 5: After morphological opening
+        step5 = cv2.cvtColor(mask_cleaned, cv2.COLOR_GRAY2BGR)
+        cv2.putText(step5, "5. Morph Open (7x7, x2)", (10, 30),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        cv2.putText(step5, "Fills holes", (10, 60),
+        cv2.putText(step5, "Removes noise", (10, 60),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
         steps.append(step5)
         
-        # Step 6: After morphological opening
-        step6 = cv2.cvtColor(mask_cleaned, cv2.COLOR_GRAY2BGR)
-        cv2.putText(step6, "6. Morph Open (7x7, x2)", (10, 30),
+        # Step 6: All contours
+        step6 = cv2.cvtColor(mask_cleaned.copy(), cv2.COLOR_GRAY2BGR)
+        cv2.drawContours(step6, contours, -1, (0, 255, 255), 2)
+        cv2.putText(step6, f"7. Contours ({len(contours)} found)", (10, 30),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        cv2.putText(step6, "Removes noise", (10, 60),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
         steps.append(step6)
         
-        # Step 7: All contours
-        step7 = cv2.cvtColor(mask_cleaned.copy(), cv2.COLOR_GRAY2BGR)
-        cv2.drawContours(step7, contours, -1, (0, 255, 255), 2)
-        cv2.putText(step7, f"7. Contours ({len(contours)} found)", (10, 30),
+        # Step 7: Largest contour only
+        step7 = frame.copy()
+        if largest is not None:
+            cv2.drawContours(step7, [largest], -1, (0, 255, 0), 3)
+        cv2.putText(step7, "7. Largest Contour", (10, 30),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        cv2.putText(step7, f"Area: {area_percent:.1f}% of frame", (10, 60),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
         steps.append(step7)
         
-        # Step 8: Largest contour only
+        # Step 8: Corners before refining
         step8 = frame.copy()
-        if largest is not None:
-            cv2.drawContours(step8, [largest], -1, (0, 255, 0), 3)
-        cv2.putText(step8, "8. Largest Contour", (10, 30),
+        if corners_updated is not None:
+            cv2.polylines(step8, [corners_updated.astype(np.int32)], True, (0, 0, 255), 3)
+            for i, corner in enumerate(corners_updated):
+                cv2.circle(step8, tuple(corner.astype(int)), 8, (255, 0, 0), -1)
+                label = ['TL', 'TR', 'BR', 'BL'][i]
+                cv2.putText(step8, label, tuple((corner + 15).astype(int)),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        cv2.putText(step8, "8. Corners Before Refining", (10, 30),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        cv2.putText(step8, f"Area: {area_percent:.1f}% of frame", (10, 60),
+        cv2.putText(step8, "Ordered corners", (10, 60),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
         steps.append(step8)
-        
-        # Step 9: Approximated quadrilateral
+
+        # Step 9: Final detection
         step9 = frame.copy()
-        if corners is not None:
-            cv2.polylines(step9, [corners.astype(np.int32)], True, (0, 0, 255), 3)
-            for i, corner in enumerate(corners):
+        if corners_final is not None:
+            cv2.polylines(step9, [corners_final.astype(np.int32)], True, (0, 0, 255), 3)
+            for i, corner in enumerate(corners_final):
                 cv2.circle(step9, tuple(corner.astype(int)), 8, (255, 0, 0), -1)
                 label = ['TL', 'TR', 'BR', 'BL'][i]
                 cv2.putText(step9, label, tuple((corner + 15).astype(int)),
@@ -205,7 +212,7 @@ class VisualizationUtils:
         banner = np.zeros((banner_height, final_viz.shape[1], 3), dtype=np.uint8)
         cv2.putText(banner, "BOARD DETECTION - STEP BY STEP ANALYSIS", 
                    (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 2)
-        cv2.putText(banner, f"Threshold: {threshold} | Detection: {'SUCCESS' if corners is not None else 'FAILED'}", 
+        cv2.putText(banner, f"Threshold: {threshold} | Detection: {'SUCCESS' if corners_final is not None else 'FAILED'}", 
                    (20, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         
         final_viz = np.vstack([banner, final_viz])
