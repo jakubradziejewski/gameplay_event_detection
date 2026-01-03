@@ -18,8 +18,10 @@ class GameEventTracker:
     def __init__(self):
         self.previous_cards = {}  # {card_id: center}
         self.previous_battles = {}  # {battle_id: (card1_id, card2_id)}
-        self.events = deque(maxlen=5)  # Keep last 5 events
-        self.movement_threshold = 30  # Pixels to consider as movement
+        self.active_battle_cards = set()  # Track cards currently in battle
+        self.events = deque(maxlen=5)
+        self.movement_threshold = 30
+        self.battle_winners = {}  # {battle_id: winner_id} for tracking who won
         
     def update(self, cards, battles):
         """Update state and generate events"""
@@ -27,15 +29,29 @@ class GameEventTracker:
         current_battle_ids = set()
         new_events = []
         
+        # Track which cards are currently in battles
+        cards_in_battle = set()
+        for battle in battles:
+            if battle.battle_ids:
+                cards_in_battle.update(battle.battle_ids)
+        
         # Track current cards
         for card in cards:
             current_card_ids.add(card.card_id)
             
+            # Skip movement tracking for cards in battle
+            if card.card_id in cards_in_battle:
+                continue
+            
             if card.card_id not in self.previous_cards:
-                # New card appeared
-                new_events.append(f"Card {card.card_id} appears")
+                # Check if this card just won a battle
+                was_in_battle = card.card_id in self.active_battle_cards
+                if was_in_battle:
+                    new_events.append(f"Card {card.card_id} wins the battle")
+                else:
+                    new_events.append(f"Card {card.card_id} appears")
             else:
-                # Check if card moved
+                # Check if card moved (only if not in battle)
                 prev_center = self.previous_cards[card.card_id]
                 dist = np.sqrt((card.center[0] - prev_center[0])**2 + 
                              (card.center[1] - prev_center[1])**2)
@@ -54,21 +70,10 @@ class GameEventTracker:
                     card1, card2 = battle.battle_ids
                     new_events.append(f"Card {card1} and {card2} have battle")
                     self.previous_battles[battle.card_id] = battle.battle_ids
-        
-        # Check for cards that disappeared
-        disappeared_cards = set(self.previous_cards.keys()) - current_card_ids
-        for card_id in disappeared_cards:
-            # Check if it's part of a battle now
-            is_in_battle = False
-            for battle in battles:
-                if battle.battle_ids and card_id in battle.battle_ids:
-                    is_in_battle = True
-                    break
-            
-            if not is_in_battle:
-                new_events.append(f"Card {card_id} disappears")
-            
-            del self.previous_cards[card_id]
+                    
+                    # Mark these cards as in battle
+                    self.active_battle_cards.add(card1)
+                    self.active_battle_cards.add(card2)
         
         # Check for battles that ended
         ended_battles = set(self.previous_battles.keys()) - current_battle_ids
@@ -82,11 +87,30 @@ class GameEventTracker:
                 winner = surviving_cards[0].card_id
                 loser = card1 if winner == card2 else card2
                 new_events.append(f"Card {loser} lost the battle")
+                self.battle_winners[battle_id] = winner
+                
+                # Remove loser from active battle cards
+                self.active_battle_cards.discard(loser)
+                # Winner will be removed from active_battle_cards when it reappears
+                
             elif len(surviving_cards) == 0:
-                # Both disappeared (rare case)
-                new_events.append(f"Battle ended")
+                # Both cards disappeared (shouldn't happen with new logic)
+                new_events.append(f"Battle ended (both cards gone)")
+                self.active_battle_cards.discard(card1)
+                self.active_battle_cards.discard(card2)
             
             del self.previous_battles[battle_id]
+        
+        # Check for cards that disappeared (not in battle)
+        disappeared_cards = set(self.previous_cards.keys()) - current_card_ids
+        for card_id in disappeared_cards:
+            # Don't report disappearance if card is in an active battle
+            if card_id not in cards_in_battle and card_id not in self.active_battle_cards:
+                new_events.append(f"Card {card_id} disappears")
+            
+            # Only remove from previous_cards if truly gone (not in battle)
+            if card_id not in cards_in_battle:
+                del self.previous_cards[card_id]
         
         # Add new events to queue
         for event in new_events:
@@ -103,7 +127,7 @@ def draw_events(frame, events, height):
     """Draw event messages on frame"""
     y_offset = 50
     for i, event in enumerate(reversed(events)):
-        alpha = 1.0 - (i * 0.15)  # Fade older events
+        alpha = 1.0 - (i * 0.15)
         
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale = 0.7
@@ -111,7 +135,6 @@ def draw_events(frame, events, height):
         
         (text_width, text_height), _ = cv2.getTextSize(event, font, font_scale, thickness)
         
-        # Draw background
         x_pos = 10
         y_pos = y_offset + (i * 35)
         
@@ -122,10 +145,51 @@ def draw_events(frame, events, height):
                      (0, 0, 0), -1)
         cv2.addWeighted(overlay, alpha * 0.7, frame, 1 - alpha * 0.7, 0, frame)
         
-        # Draw text
         color = tuple(int(c * alpha) for c in [255, 255, 255])
         cv2.putText(frame, event, (x_pos, y_pos),
                    font, font_scale, color, thickness)
+
+def draw_battle_status(frame, battle, tracked_obj):
+    """Draw battle status information"""
+    if tracked_obj is None:
+        return
+    
+    # Show battle resilience info
+    status_lines = []
+    
+    if tracked_obj.frames_both_missing > 0:
+        status_lines.append(f"Occluded: {tracked_obj.frames_both_missing}f")
+    
+    if tracked_obj.frames_one_missing > 0:
+        missing_id = tracked_obj.missing_card_id
+        remaining = CardDetector().battle_end_threshold - tracked_obj.frames_one_missing
+        status_lines.append(f"Card {missing_id} missing: {tracked_obj.frames_one_missing}f")
+        if remaining > 0:
+            status_lines.append(f"Ending in: {remaining}f")
+    
+    if status_lines:
+        # Draw status below battle box
+        bx, by, bw, bh = tracked_obj.bbox
+        status_y = by + bh + 20
+        
+        for i, line in enumerate(status_lines):
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.5
+            thickness = 1
+            
+            (text_width, text_height), _ = cv2.getTextSize(line, font, font_scale, thickness)
+            
+            text_x = bx
+            text_y = status_y + (i * 20)
+            
+            # Draw background
+            cv2.rectangle(frame,
+                         (text_x - 3, text_y - text_height - 3),
+                         (text_x + text_width + 3, text_y + 3),
+                         (0, 0, 0), -1)
+            
+            cv2.putText(frame, line, (text_x, text_y),
+                       font, font_scale, (255, 255, 0), thickness)
 
 def main():
     video_path = Path(VIDEO_PATH)
@@ -176,6 +240,8 @@ def main():
     event_tracker = GameEventTracker()
     
     print("Step 2: Processing frames with card detection...")
+    print(f"Battle end threshold: {card_detector.battle_end_threshold} frames")
+    print(f"Battle noise threshold: {card_detector.battle_noise_threshold} frames")
     start_time = time.time()
 
     frame_count = 0
@@ -192,7 +258,6 @@ def main():
         if current_board is not None:
             current_board = board_detector.smooth_detection(current_board)
         else:
-            # Use last known board position
             current_board = board_corners
         
         # Detect cards on full frame, then filter to board
@@ -210,18 +275,16 @@ def main():
             board_int = current_board.astype(np.int32)
             cv2.polylines(frame, [board_int], True, (255, 255, 0), 2)
             
-            # Add board label
             cv2.putText(frame, "Board", 
                        (board_int[0][0] + 10, board_int[0][1] + 30),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
-        # Draw battle pairs
+        # Draw battle pairs with status
         for battle in battles:
             cv2.drawContours(frame, [battle.box], 0, (0, 0, 255), 3)
             
             top_point = get_top_point(battle.box)
             
-            # Create battle label with IDs if available
             if battle.battle_ids:
                 text = f"Battle {battle.battle_ids[0]} vs {battle.battle_ids[1]}"
             else:
@@ -242,6 +305,10 @@ def main():
             
             cv2.putText(frame, text, (text_x, text_y), 
                        font, font_scale, (0, 0, 255), thickness)
+            
+            # Draw battle status
+            tracked_obj = card_detector.tracked_objects.get(battle.card_id)
+            draw_battle_status(frame, battle, tracked_obj)
 
         # Draw individual cards
         for card in cards:
