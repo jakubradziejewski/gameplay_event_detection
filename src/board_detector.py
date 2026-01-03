@@ -290,7 +290,17 @@ class BoardDetector:
             frame_area = frame.shape[0] * frame.shape[1]
             area_percent = area / frame_area * 100
         
-        corners = self._detect_inner_from_brightness(frame, threshold)
+        x, y, w, h = cv2.boundingRect(largest)
+        corners = np.array([
+            [x, y],
+            [x + w, y],
+            [x + w, y + h],
+            [x, y + h]
+        ], dtype=np.float32)
+
+        corners_updated = self.find_edges_with_white_threshold(mask_cleaned, corners, dx=5, threshold_white=0.8)
+
+        corners_final = self._detect_inner_from_brightness(frame, threshold)
         
         return {
             'gray': gray,
@@ -299,7 +309,8 @@ class BoardDetector:
             'mask_cleaned': mask_cleaned,
             'contours': contours,
             'largest': largest,
-            'corners': corners,
+            'corners_updated': corners_updated,
+            'corners_final': corners_final,
             'threshold': threshold,
             'area_percent': area_percent
         }
