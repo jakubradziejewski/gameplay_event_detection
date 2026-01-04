@@ -13,17 +13,23 @@ OUTPUT_DIR = "output_video"
 SAVE_VIDEO = True
 BRIGHTNESS_THRESHOLD = 200
 
+# Team colors (BGR format for OpenCV)
+TEAM_COLORS = {
+    'A': (255, 0, 0),    # Blue
+    'B': (0, 255, 0)     # Green
+}
+
 class GameEventTracker:
     """Track game events like card appearances, movements, battles"""
     def __init__(self):
-        self.previous_cards = {}  # {card_id: center}
-        self.previous_battles = {}  # {battle_id: (card1_id, card2_id)}
-        self.active_battle_cards = set()  # Track cards currently in battle
+        self.previous_cards = {}
+        self.previous_battles = {}
+        self.active_battle_cards = set()
         self.events = deque(maxlen=5)
         self.movement_threshold = 30
-        self.battle_winners = {}  # {battle_id: winner_id} for tracking who won
+        self.battle_winners = {}
         
-    def update(self, cards, battles):
+    def update(self, cards, battles, card_detector):
         """Update state and generate events"""
         current_card_ids = set()
         current_battle_ids = set()
@@ -44,14 +50,14 @@ class GameEventTracker:
                 continue
             
             if card.card_id not in self.previous_cards:
-                # Check if this card just won a battle
                 was_in_battle = card.card_id in self.active_battle_cards
                 if was_in_battle:
-                    new_events.append(f"Card {card.card_id} wins the battle")
+                    team_text = f" (Team {card.team})" if card.team else ""
+                    new_events.append(f"Card {card.card_id}{team_text} wins the battle")
                 else:
-                    new_events.append(f"Card {card.card_id} appears")
+                    team_text = f" (Team {card.team})" if card.team else ""
+                    new_events.append(f"Card {card.card_id}{team_text} appears")
             else:
-                # Check if card moved (only if not in battle)
                 prev_center = self.previous_cards[card.card_id]
                 dist = np.sqrt((card.center[0] - prev_center[0])**2 + 
                              (card.center[1] - prev_center[1])**2)
@@ -66,12 +72,17 @@ class GameEventTracker:
                 current_battle_ids.add(battle.card_id)
                 
                 if battle.card_id not in self.previous_battles:
-                    # New battle started
                     card1, card2 = battle.battle_ids
-                    new_events.append(f"Card {card1} and {card2} have battle")
+                    
+                    # Get team info for battle participants
+                    team1 = card_detector.tracked_objects.get(card1)
+                    team2 = card_detector.tracked_objects.get(card2)
+                    team1_name = team1.team if team1 else "?"
+                    team2_name = team2.team if team2 else "?"
+                    
+                    new_events.append(f"Battle: {card1}({team1_name}) vs {card2}({team2_name})")
                     self.previous_battles[battle.card_id] = battle.battle_ids
                     
-                    # Mark these cards as in battle
                     self.active_battle_cards.add(card1)
                     self.active_battle_cards.add(card2)
         
@@ -80,35 +91,32 @@ class GameEventTracker:
         for battle_id in ended_battles:
             card1, card2 = self.previous_battles[battle_id]
             
-            # Check which card survived
             surviving_cards = [c for c in cards if c.card_id in [card1, card2]]
             
             if len(surviving_cards) == 1:
                 winner = surviving_cards[0].card_id
                 loser = card1 if winner == card2 else card2
-                new_events.append(f"Card {loser} lost the battle")
+                
+                winner_team = surviving_cards[0].team
+                team_text = f" (Team {winner_team})" if winner_team else ""
+                new_events.append(f"Card {loser} lost to {winner}{team_text}")
                 self.battle_winners[battle_id] = winner
                 
-                # Remove loser from active battle cards
                 self.active_battle_cards.discard(loser)
-                # Winner will be removed from active_battle_cards when it reappears
                 
             elif len(surviving_cards) == 0:
-                # Both cards disappeared (shouldn't happen with new logic)
                 new_events.append(f"Battle ended (both cards gone)")
                 self.active_battle_cards.discard(card1)
                 self.active_battle_cards.discard(card2)
             
             del self.previous_battles[battle_id]
         
-        # Check for cards that disappeared (not in battle)
+        # Check for cards that disappeared
         disappeared_cards = set(self.previous_cards.keys()) - current_card_ids
         for card_id in disappeared_cards:
-            # Don't report disappearance if card is in an active battle
             if card_id not in cards_in_battle and card_id not in self.active_battle_cards:
                 new_events.append(f"Card {card_id} disappears")
             
-            # Only remove from previous_cards if truly gone (not in battle)
             if card_id not in cards_in_battle:
                 del self.previous_cards[card_id]
         
@@ -149,12 +157,40 @@ def draw_events(frame, events, height):
         cv2.putText(frame, event, (x_pos, y_pos),
                    font, font_scale, color, thickness)
 
+def draw_scoreboard(frame, scores, width):
+    """Draw team scores at the top of the frame"""
+    # Scoreboard background
+    board_height = 60
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (0, 0), (width, board_height), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
+    
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 1.2
+    thickness = 3
+    
+    # Team A (Blue) on the left
+    team_a_text = f"Team A: {scores['A']}"
+    (text_width_a, text_height_a), _ = cv2.getTextSize(team_a_text, font, font_scale, thickness)
+    x_a = 50
+    y_a = 40
+    cv2.putText(frame, team_a_text, (x_a, y_a), font, font_scale, TEAM_COLORS['A'], thickness)
+    
+    # Team B (Green) on the right
+    team_b_text = f"Team B: {scores['B']}"
+    (text_width_b, text_height_b), _ = cv2.getTextSize(team_b_text, font, font_scale, thickness)
+    x_b = width - text_width_b - 50
+    y_b = 40
+    cv2.putText(frame, team_b_text, (x_b, y_b), font, font_scale, TEAM_COLORS['B'], thickness)
+    
+    # Draw divider line
+    cv2.line(frame, (width // 2, 0), (width // 2, board_height), (255, 255, 255), 2)
+
 def draw_battle_status(frame, battle, tracked_obj):
     """Draw battle status information"""
     if tracked_obj is None:
         return
     
-    # Show battle resilience info
     status_lines = []
     
     if tracked_obj.frames_both_missing > 0:
@@ -168,7 +204,6 @@ def draw_battle_status(frame, battle, tracked_obj):
             status_lines.append(f"Ending in: {remaining}f")
     
     if status_lines:
-        # Draw status below battle box
         bx, by, bw, bh = tracked_obj.bbox
         status_y = by + bh + 20
         
@@ -182,7 +217,6 @@ def draw_battle_status(frame, battle, tracked_obj):
             text_x = bx
             text_y = status_y + (i * 20)
             
-            # Draw background
             cv2.rectangle(frame,
                          (text_x - 3, text_y - text_height - 3),
                          (text_x + text_width + 3, text_y + 3),
@@ -239,7 +273,7 @@ def main():
     card_detector = CardDetector()
     event_tracker = GameEventTracker()
     
-    print("Step 2: Processing frames with card detection...")
+    print("Step 2: Processing frames with card detection and team tracking...")
     print(f"Battle end threshold: {card_detector.battle_end_threshold} frames")
     print(f"Battle noise threshold: {card_detector.battle_noise_threshold} frames")
     start_time = time.time()
@@ -263,12 +297,18 @@ def main():
         # Detect cards on full frame, then filter to board
         cards, battles = card_detector.detect_cards(frame, current_board)
         
+        # Get team scores
+        scores = card_detector.get_team_scores(cards, battles)
+        
         # Update event tracker
-        events = event_tracker.update(cards, battles)
+        events = event_tracker.update(cards, battles, card_detector)
         
         # Update statistics
         cards_detected_total += len(cards)
         battles_detected_total += len(battles)
+        
+        # Draw scoreboard
+        draw_scoreboard(frame, scores, width)
         
         # Draw board boundary
         if current_board is not None:
@@ -286,7 +326,12 @@ def main():
             top_point = get_top_point(battle.box)
             
             if battle.battle_ids:
-                text = f"Battle {battle.battle_ids[0]} vs {battle.battle_ids[1]}"
+                # Get team info for battle participants
+                team1 = card_detector.tracked_objects.get(battle.battle_ids[0])
+                team2 = card_detector.tracked_objects.get(battle.battle_ids[1])
+                team1_name = team1.team if team1 else "?"
+                team2_name = team2.team if team2 else "?"
+                text = f"Battle {battle.battle_ids[0]}({team1_name}) vs {battle.battle_ids[1]}({team2_name})"
             else:
                 text = f"Battle"
             
@@ -310,15 +355,19 @@ def main():
             tracked_obj = card_detector.tracked_objects.get(battle.card_id)
             draw_battle_status(frame, battle, tracked_obj)
 
-        # Draw individual cards
+        # Draw individual cards with team colors
         for card in cards:
-            cv2.drawContours(frame, [card.box], 0, (0, 255, 0), 2)
+            # Get team color
+            color = TEAM_COLORS.get(card.team, (0, 255, 0))  # Default to green if no team
+            
+            cv2.drawContours(frame, [card.box], 0, color, 3)
             
             top_point = get_top_point(card.box)
-            label = f"Card {card.card_id}"
+            team_text = f" ({card.team})" if card.team else ""
+            label = f"Card {card.card_id}{team_text}"
             
             font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 0.5
+            font_scale = 0.6
             thickness = 2
             (text_width, text_height), _ = cv2.getTextSize(label, font, font_scale, thickness)
             
@@ -331,7 +380,7 @@ def main():
                          (0, 0, 0), -1)
             
             cv2.putText(frame, label, (text_x, text_y), 
-                       font, font_scale, (0, 255, 0), thickness)
+                       font, font_scale, color, thickness)
 
         # Draw events
         draw_events(frame, events, height)
@@ -351,7 +400,8 @@ def main():
             avg_battles = battles_detected_total / frame_count
             print(f"Frame {frame_count}/{total_frames} | "
                   f"Speed: {frame_count/elapsed:.2f} fps | "
-                  f"Avg Cards: {avg_cards:.1f} | Avg Battles: {avg_battles:.1f}")
+                  f"Avg Cards: {avg_cards:.1f} | Avg Battles: {avg_battles:.1f} | "
+                  f"Score A:{scores['A']} B:{scores['B']}")
 
     cap.release()
     if SAVE_VIDEO:
@@ -365,6 +415,7 @@ def main():
     print(f"Processing time: {elapsed_total:.2f}s ({frame_count/elapsed_total:.2f} fps)")
     print(f"Average cards per frame: {cards_detected_total/frame_count:.2f}")
     print(f"Average battles per frame: {battles_detected_total/frame_count:.2f}")
+    print(f"Final Score - Team A: {scores['A']}, Team B: {scores['B']}")
     print(f"Output saved to: {output_dir / f'detected_{video_path.stem}.mp4'}")
     print(f"{'='*70}")
 
