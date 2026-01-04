@@ -8,9 +8,8 @@ from card_detector import CardDetector
 from board_detector import BoardDetector
 
 # Configuration
-VIDEO_PATH = "data/medium/medium.mp4"
+VIDEO_PATH = "data/easy/easy.mp4"
 OUTPUT_DIR = "output_video"
-SAVE_VIDEO = True
 TEAM_COLORS = {'A': (255, 0, 0), 'B': (0, 255, 0)}
 
 class GameEventTracker:
@@ -113,11 +112,15 @@ def draw_text_with_bg(frame, text, pos, color, font_scale=0.7, thickness=2, bg_a
     cv2.addWeighted(overlay, bg_alpha, frame, 1-bg_alpha, 0, frame)
     cv2.putText(frame, text, (x, y), font, font_scale, color, thickness)
 
-def draw_events(frame, events):
-    for i, event in enumerate(reversed(events)):
-        alpha = 1.0 - (i * 0.15)
-        color = tuple(int(c * alpha) for c in [255, 255, 255])
-        draw_text_with_bg(frame, event, (10, 50 + i*35), color, bg_alpha=alpha*0.7)
+def draw_events(frame, events, width):
+    if not events:
+        return
+    event = events[-1]
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    (tw, th), _ = cv2.getTextSize(event, font, 0.8, 2)
+    x = (width - tw) // 2 
+    y = 80
+    draw_text_with_bg(frame, event, (x, y), (255, 255, 255), font_scale=0.8, bg_alpha=0.8)
 
 def draw_scoreboard(frame, scores, width):
     overlay = frame.copy()
@@ -159,8 +162,7 @@ def main():
     print(f"✓ Board detected: {board.astype(int).tolist() if board is not None else 'Full frame'}")
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     
-    if SAVE_VIDEO:
-        out = cv2.VideoWriter(str(output_dir / f"detected_{video_path.stem}.mp4"),
+    out = cv2.VideoWriter(str(output_dir / f"detected_{video_path.stem}.mp4"),
                              cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
 
     detector = CardDetector()
@@ -172,7 +174,7 @@ def main():
           f"Edge buffer X={detector.params.edge_buffer_x*100:.0f}% Y={detector.params.edge_buffer_y*100:.0f}%")
     
     start = time.time()
-    frame_count = total_cards = total_battles = 0
+    frame_count = 0
     
     while cap.isOpened():
         ret, frame = cap.read()
@@ -187,8 +189,6 @@ def main():
         events = tracker.update(cards, battles, detector)
         
         real_cards = [c for c in cards if not c.is_ghost]
-        total_cards += len(real_cards)
-        total_battles += len(battles)
         
         draw_scoreboard(frame, scores, width)
         
@@ -201,8 +201,10 @@ def main():
         for battle in battles:
             tracked = detector.tracked_objects.get(battle.card_id)
             confirmed = tracked and tracked.is_confirmed_battle
-            color = (0, 0, 255) if confirmed else (0, 165, 255)
-            cv2.drawContours(frame, [battle.box], 0, color, 3 if confirmed else 2)
+            if not confirmed:
+                continue    
+            color = (0, 0, 255)
+            cv2.drawContours(frame, [battle.box], 0, color, 3)
             
             top = get_top_point(battle.box)
             if battle.battle_ids:
@@ -245,34 +247,29 @@ def main():
             draw_text_with_bg(frame, label, (top[0]-tw//2, top[1]-10), lcolor,
                             font_scale=0.6, bg_alpha=0.5 if card.is_ghost else 1.0)
 
-        draw_events(frame, events)
+        draw_events(frame, events, width)
         
         stats = f"Frame: {frame_count}/{total} | Cards: {len(real_cards)} | Battles: {len(battles)}"
         cv2.putText(frame, stats, (10, height-20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-        if SAVE_VIDEO:
-            out.write(frame)
+
+        out.write(frame)
 
         frame_count += 1
         if frame_count % 30 == 0:
             elapsed = time.time() - start
             print(f"Frame {frame_count}/{total} | Speed: {frame_count/elapsed:.2f} fps | "
-                  f"Avg Cards: {total_cards/frame_count:.1f} | Battles: {total_battles/frame_count:.1f} | "
                   f"Score A:{scores['A']} B:{scores['B']}")
-
     cap.release()
-    if SAVE_VIDEO:
-        out.release()
+    out.release()
     
     elapsed = time.time() - start
-    print(f"\n{'='*70}")
-    print(f"SUMMARY")
-    print(f"{'='*70}")
+
+    print("Summary:")
     print(f"Frames: {frame_count} | Time: {elapsed:.2f}s ({frame_count/elapsed:.2f} fps)")
-    print(f"Avg Cards: {total_cards/frame_count:.2f} | Avg Battles: {total_battles/frame_count:.2f}")
     print(f"Final Score - Team A: {scores['A']}, Team B: {scores['B']}")
     print(f"Output: {output_dir / f'detected_{video_path.stem}.mp4'}")
-    print(f"{'='*70}")
+
 
 if __name__ == "__main__":
     main()
