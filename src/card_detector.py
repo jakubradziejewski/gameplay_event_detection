@@ -9,17 +9,22 @@ class DetectionParams:
     canny_low: int = 50
     canny_high: int = 150
     # Stricter individual card parameters
-    min_area: int = 9000           # Slightly stricter minimum
-    max_area: int = 16000          # Stricter maximum to avoid hands
-    min_aspect: float = 1.2        # Height must be > width (vertical cards)
-    max_aspect: float = 2.8        # Not too elongated
+    min_area: int = 9000
+    max_area: int = 16000
+    min_aspect: float = 1.2
+    max_aspect: float = 2.8
     solidity_threshold: float = 0.85
-    # Battle detection parameters - stricter
-    battle_min_area: int = 18000   # Increased from 17000
-    battle_max_area: int = 34000   # Decreased from 36000
-    battle_min_aspect: float = 0.4 # Increased from 0.3
-    battle_max_aspect: float = 1.3 # Decreased from 1.5
-    battle_confirmation_frames: int = 5  # Frames to confirm battle
+    # Edge zone stricter parameters
+    edge_buffer_percent: float = 0.10  # 10% buffer from edges
+    edge_min_area: int = 10000  # Stricter for edge zones
+    edge_solidity_threshold: float = 0.90  # Much stricter solidity
+    edge_confirmation_frames: int = 3  # Must be seen for 3 frames
+    # Battle detection parameters
+    battle_min_area: int = 18000
+    battle_max_area: int = 34000
+    battle_min_aspect: float = 0.4
+    battle_max_aspect: float = 1.3
+    battle_confirmation_frames: int = 5
 
 @dataclass
 class Card:
@@ -31,7 +36,8 @@ class Card:
     is_battle: bool = False
     battle_ids: Optional[Tuple[int, int]] = None
     team: Optional[str] = None
-    is_ghost: bool = False  # Track if this is a ghost (invisible but tracked)
+    is_ghost: bool = False
+    in_edge_zone: bool = False
 
 @dataclass
 class TrackedObject:
@@ -44,19 +50,22 @@ class TrackedObject:
     frames_lost: int = 0
     last_center: Tuple[float, float] = None
     team: Optional[str] = None
-    # Battle-specific tracking
     initial_bbox: Optional[Tuple[int, int, int, int]] = None
     initial_card_positions: Optional[Dict[int, Tuple[float, float]]] = None
     battle_start_frame: Optional[int] = None
     frames_both_missing: int = 0
     frames_one_missing: int = 0
     missing_card_id: Optional[int] = None
-    # For ghost display
     last_valid_bbox: Optional[Tuple[int, int, int, int]] = None
     last_valid_box: Optional[np.ndarray] = None
-    # Battle confirmation
     is_confirmed_battle: bool = False
     battle_confirmation_count: int = 0
+    # Edge zone tracking
+    in_edge_zone: bool = False
+    edge_confirmation_count: int = 0
+    # Battle tracking
+    was_in_battle: bool = False
+    battle_id_involved: Optional[int] = None
 
 class CardDetector:
     def __init__(self, params=None, tracker_type='KCF'):
@@ -67,19 +76,17 @@ class CardDetector:
         self.max_frames_lost = 30
         self.previous_card_positions: Dict[int, Tuple[float, float]] = {}
         
-        # Battle management
         self.battle_end_threshold = 40
         self.battle_noise_threshold = 40
         self.current_frame = 0
         
-        # Team tracking
         self.board_center_x = None
+        self.max_new_card_overlap = 0.1
+        self.max_ghost_frames = 20
         
-        # Overlap detection
-        self.max_new_card_overlap = 0.1  # 10% max overlap for new cards
-        
-        # Ghost display duration
-        self.max_ghost_frames = 20  # Increased from 10 to 20 frames
+        # Edge zone tracking
+        self.edge_buffer = None
+        self.pending_edge_cards: Dict[int, int] = {}  # card_id -> frames_seen
         
     def _create_tracker(self):
         """Create a new OpenCV tracker"""
@@ -95,13 +102,62 @@ class CardDetector:
         
         x = center[0]
         return 'A' if x < self.board_center_x else 'B'
+    
+    def _calculate_edge_buffer(self, board_corners: np.ndarray):
+        """Calculate the edge buffer zone (10% from board edges)"""
+        if board_corners is None:
+            return None
+        
+        # Get bounding box of board
+        x_min = np.min(board_corners[:, 0])
+        y_min = np.min(board_corners[:, 1])
+        x_max = np.max(board_corners[:, 0])
+        y_max = np.max(board_corners[:, 1])
+        
+        width = x_max - x_min
+        height = y_max - y_min
+        
+        buffer_x = width * self.params.edge_buffer_percent
+        buffer_y = height * self.params.edge_buffer_percent
+        
+        return {
+            'x_min': x_min,
+            'y_min': y_min,
+            'x_max': x_max,
+            'y_max': y_max,
+            'buffer_x': buffer_x,
+            'buffer_y': buffer_y,
+            'inner_x_min': x_min + buffer_x,
+            'inner_y_min': y_min + buffer_y,
+            'inner_x_max': x_max - buffer_x,
+            'inner_y_max': y_max - buffer_y
+        }
+    
+    def _is_in_edge_zone(self, center: Tuple[float, float]) -> bool:
+        """Check if a card center is in the edge buffer zone"""
+        if self.edge_buffer is None:
+            return False
+        
+        x, y = center
+        
+        # Check if in edge zone (outside inner boundary but inside outer boundary)
+        in_board = (self.edge_buffer['x_min'] <= x <= self.edge_buffer['x_max'] and
+                   self.edge_buffer['y_min'] <= y <= self.edge_buffer['y_max'])
+        
+        in_safe_zone = (self.edge_buffer['inner_x_min'] <= x <= self.edge_buffer['inner_x_max'] and
+                       self.edge_buffer['inner_y_min'] <= y <= self.edge_buffer['inner_y_max'])
+        
+        return in_board and not in_safe_zone
 
     def detect_cards(self, frame, board_corners=None):
         self.current_frame += 1
         
-        # Calculate board center if available
-        if board_corners is not None and self.board_center_x is None:
-            self.board_center_x = np.mean(board_corners[:, 0])
+        # Calculate board center and edge buffer if available
+        if board_corners is not None:
+            if self.board_center_x is None:
+                self.board_center_x = np.mean(board_corners[:, 0])
+            if self.edge_buffer is None:
+                self.edge_buffer = self._calculate_edge_buffer(board_corners)
         
         # Update all existing trackers
         self._update_trackers(frame)
@@ -114,20 +170,23 @@ class CardDetector:
             detected_cards = self._filter_fully_inside_board(detected_cards, board_corners)
             detected_battles = self._filter_fully_inside_board(detected_battles, board_corners)
         
+        # Mark cards in edge zone and apply stricter filtering
+        detected_cards = self._filter_edge_zone_cards(detected_cards)
+        
         # BLOCK detection in active battle areas
         detected_cards = self._filter_battle_zones(detected_cards)
         detected_battles = self._filter_battle_zones(detected_battles)
         
-        # Merge overlapping detections (keep lower ID)
+        # Merge overlapping detections
         detected_cards = self._merge_overlapping_detections(detected_cards)
         
         # Match detections with tracked objects or create new trackers
         all_objects = self._match_and_track(frame, detected_cards, detected_battles, board_corners)
         
-        # Process battle states (check for endings, handle occlusions)
+        # Process battle states
         all_objects = self._process_battle_states(all_objects, board_corners)
         
-        # Add ghost cards (invisible but tracked at last known position)
+        # Add ghost cards
         all_objects = self._add_ghost_cards(all_objects)
         
         # Separate cards and battles for return
@@ -136,12 +195,47 @@ class CardDetector:
         
         return cards, battles
     
+    def _filter_edge_zone_cards(self, detections: List[Card]) -> List[Card]:
+        """Filter and validate cards in edge zones with stricter requirements"""
+        filtered = []
+        
+        for detection in detections:
+            in_edge = self._is_in_edge_zone(detection.center)
+            detection.in_edge_zone = in_edge
+            
+            if not in_edge:
+                # Not in edge zone, accept normally
+                filtered.append(detection)
+            else:
+                # In edge zone - apply stricter validation
+                # Check if this matches an existing tracked card
+                detection_bbox = self._box_to_bbox(detection.box)
+                
+                matched_existing = False
+                for obj_id, tracked_obj in self.tracked_objects.items():
+                    if tracked_obj.is_battle:
+                        continue
+                    
+                    iou = self._calculate_iou(detection_bbox, tracked_obj.bbox)
+                    if iou > 0.3:
+                        matched_existing = True
+                        break
+                
+                if matched_existing:
+                    # Existing card, keep it
+                    filtered.append(detection)
+                else:
+                    # New detection in edge zone - needs confirmation
+                    # For now, skip it (will be picked up by confirmation logic later)
+                    pass
+        
+        return filtered
+    
     def _merge_overlapping_detections(self, detections: List[Card]) -> List[Card]:
         """Merge detections that overlap > 10%, keeping the one with lower ID or first detected"""
         if not detections:
             return []
         
-        # Sort by card_id (tracked cards first, then new detections)
         tracked = [d for d in detections if d.card_id is not None]
         new = [d for d in detections if d.card_id is None]
         
@@ -167,7 +261,7 @@ class CardDetector:
                 overlap = self._calculate_overlap_ratio(bbox2, bbox1)
                 
                 if overlap > self.max_new_card_overlap:
-                    used.add(j)  # Mark det2 as used, keep det1
+                    used.add(j)
             
             merged.append(det1)
             used.add(i)
@@ -201,11 +295,9 @@ class CardDetector:
             if obj_id in visible_ids:
                 continue
             
-            # Don't show ghosts for battles or cards that can disappear
             if tracked.is_battle:
                 continue
             
-            # Only show ghosts for cards temporarily occluded (up to max_ghost_frames)
             if tracked.frames_lost > 0 and tracked.frames_lost <= self.max_ghost_frames:
                 if tracked.last_valid_bbox and tracked.last_valid_box is not None:
                     x, y, w, h = tracked.last_valid_bbox
@@ -227,12 +319,10 @@ class CardDetector:
         """Calculate current score for each team based on cards on board"""
         scores = {'A': 0, 'B': 0}
         
-        # Count individual cards (exclude ghosts)
         for card in cards:
             if card.team and not card.is_ghost:
                 scores[card.team] += 1
         
-        # Count cards in battles (one for each team)
         for battle in battles:
             if battle.battle_ids:
                 for card_id in battle.battle_ids:
@@ -241,6 +331,29 @@ class CardDetector:
                         scores[tracked.team] += 1
         
         return scores
+    
+    def get_battle_result_for_card(self, card_id: int) -> Optional[str]:
+        """Check if a card was in a battle and return the result (won/lost/cancelled)"""
+        tracked = self.tracked_objects.get(card_id)
+        if not tracked or not tracked.was_in_battle:
+            return None
+        
+        battle_id = tracked.battle_id_involved
+        if battle_id is None:
+            return None
+        
+        # Check if battle still exists
+        battle_tracked = self.tracked_objects.get(battle_id)
+        if battle_tracked is not None and battle_tracked.is_battle:
+            # Battle still ongoing
+            return "ongoing"
+        
+        # Battle ended - check if this card still exists
+        if tracked.frames_lost > 0:
+            return "lost"  # Card was removed
+        
+        # Card still exists and battle ended
+        return "won"
     
     def _filter_battle_zones(self, objects: List[Card]) -> List[Card]:
         """Remove any detections that overlap with CONFIRMED battle zones only"""
@@ -254,20 +367,17 @@ class CardDetector:
         for obj in objects:
             obj_center = obj.center
             
-            # Check if this object overlaps with any confirmed battle zone
             overlaps_battle = False
             for battle in active_battles:
                 bx, by, bw, bh = battle.bbox
                 battle_center = (bx + bw/2, by + bh/2)
                 
-                # Check if object center is within battle zone (with margin)
                 dist = np.sqrt((obj_center[0] - battle_center[0])**2 + 
                               (obj_center[1] - battle_center[1])**2)
                 
-                # Battle zone radius is roughly half the battle bbox diagonal
                 battle_radius = np.sqrt(bw**2 + bh**2) / 2
                 
-                if dist < battle_radius * 1.2:  # 20% margin
+                if dist < battle_radius * 1.2:
                     overlaps_battle = True
                     break
             
@@ -279,7 +389,7 @@ class CardDetector:
     def _process_battle_states(self, all_objects: List[Card], board_corners) -> List[Card]:
         """Process battle states: confirm battles, check for endings, handle occlusions, restore cards"""
         battles_to_end = []
-        battles_to_remove = []  # Unconfirmed battles that should be removed
+        battles_to_remove = []
         cards_to_restore = []
         
         for battle in [obj for obj in all_objects if obj.is_battle]:
@@ -292,49 +402,43 @@ class CardDetector:
             
             card1_id, card2_id = battle.battle_ids
             
-            # Check which cards are currently detected
+            # Mark cards as being in battle
+            for cid in [card1_id, card2_id]:
+                if cid in self.tracked_objects:
+                    self.tracked_objects[cid].was_in_battle = True
+                    self.tracked_objects[cid].battle_id_involved = battle.card_id
+            
             detected_card_ids = {obj.card_id for obj in all_objects if not obj.is_battle}
             card1_present = card1_id in detected_card_ids
             card2_present = card2_id in detected_card_ids
             
-            # Check if cards still exist in tracking (not removed)
             card1_exists = card1_id in self.tracked_objects
             card2_exists = card2_id in self.tracked_objects
             
-            # If battle is not yet confirmed, check for confirmation
             if not tracked_battle.is_confirmed_battle:
-                # Both cards should be present (or at least tracked) for confirmation
                 if card1_present and card2_present:
                     tracked_battle.battle_confirmation_count += 1
                     
                     if tracked_battle.battle_confirmation_count >= self.params.battle_confirmation_frames:
-                        # Battle is confirmed!
                         tracked_battle.is_confirmed_battle = True
                         print(f"Battle {battle.card_id} confirmed after {tracked_battle.battle_confirmation_count} frames")
                 else:
-                    # Cards separated before confirmation - cancel battle
                     tracked_battle.battle_confirmation_count = 0
                     
-                    # If cards moved apart, remove this unconfirmed battle
                     if tracked_battle.frames_lost > 3:
                         battles_to_remove.append(battle.card_id)
                         continue
             
-            # Only process battle endings for CONFIRMED battles
             if tracked_battle.is_confirmed_battle:
-                # Battle ending logic - check if card is removed OR moved away from battle
-                
-                # Check if cards are still in battle position
                 card1_in_battle_pos = False
                 card2_in_battle_pos = False
                 
                 if card1_exists:
                     card1_tracked = self.tracked_objects[card1_id]
-                    # Check distance from battle center
                     if card1_tracked.last_center:
                         dist = np.sqrt((card1_tracked.last_center[0] - tracked_battle.last_center[0])**2 +
                                      (card1_tracked.last_center[1] - tracked_battle.last_center[1])**2)
-                        card1_in_battle_pos = dist < 100  # Within 100px of battle center
+                        card1_in_battle_pos = dist < 100
                 
                 if card2_exists:
                     card2_tracked = self.tracked_objects[card2_id]
@@ -343,28 +447,21 @@ class CardDetector:
                                      (card2_tracked.last_center[1] - tracked_battle.last_center[1])**2)
                         card2_in_battle_pos = dist < 100
                 
-                # Battle ends if: card removed OR card moved away from battle
                 if not card1_exists or not card1_in_battle_pos:
                     if not card2_exists or not card2_in_battle_pos:
-                        # Both removed or moved - battle cancelled
                         battles_to_remove.append(battle.card_id)
                     else:
-                        # Card 1 lost (removed or fled)
                         battles_to_end.append((battle.card_id, card2_id, card1_id))
                     
                 elif not card2_exists or not card2_in_battle_pos:
-                    # Card 2 lost (removed or fled)
                     battles_to_end.append((battle.card_id, card1_id, card2_id))
                     
                 else:
-                    # Both cards still exist in battle - battle continues
-                    # Reset missing counters if both present
                     if card1_present and card2_present:
                         tracked_battle.frames_both_missing = 0
                         tracked_battle.frames_one_missing = 0
                         tracked_battle.missing_card_id = None
                     
-                    # Track occlusions for display purposes only
                     if not card1_present and not card2_present:
                         tracked_battle.frames_both_missing += 1
                     elif not card1_present or not card2_present:
@@ -375,23 +472,25 @@ class CardDetector:
                             tracked_battle.missing_card_id = missing_id
                             tracked_battle.frames_one_missing = 1
         
-        # Remove unconfirmed battles that failed to confirm
+        # Remove unconfirmed battles
         for battle_id in battles_to_remove:
             tracked_battle = self.tracked_objects.get(battle_id)
             if tracked_battle and tracked_battle.battle_ids:
-                # Don't remove the cards - they should be detected normally now
-                pass
+                # Clear battle markers from cards
+                for cid in tracked_battle.battle_ids:
+                    if cid in self.tracked_objects:
+                        self.tracked_objects[cid].was_in_battle = False
+                        self.tracked_objects[cid].battle_id_involved = None
             
             if battle_id in self.tracked_objects:
                 del self.tracked_objects[battle_id]
             
             all_objects = [obj for obj in all_objects if obj.card_id != battle_id]
         
-        # End confirmed battles and restore winner cards
+        # End confirmed battles
         for battle_id, winner_id, loser_id in battles_to_end:
             tracked_battle = self.tracked_objects.get(battle_id)
             if tracked_battle and tracked_battle.initial_card_positions:
-                # Restore winner card at its initial position
                 winner_pos = tracked_battle.initial_card_positions.get(winner_id)
                 winner_tracked = self.tracked_objects.get(winner_id)
                 winner_team = winner_tracked.team if winner_tracked else None
@@ -418,24 +517,26 @@ class CardDetector:
                         battle_ids=None,
                         frames_lost=0,
                         last_center=winner_pos,
-                        team=winner_team
+                        team=winner_team,
+                        was_in_battle=False,  # Battle is over
+                        battle_id_involved=None
                     )
                     
                     cards_to_restore.append((winner_id, card_bbox, winner_pos, winner_team))
             
-            # Remove loser from tracking
+            # Remove loser
             if loser_id in self.tracked_objects:
                 del self.tracked_objects[loser_id]
             if loser_id in self.previous_card_positions:
                 del self.previous_card_positions[loser_id]
             
-            # Remove battle tracker
+            # Remove battle
             if battle_id in self.tracked_objects:
                 del self.tracked_objects[battle_id]
             
             all_objects = [obj for obj in all_objects if obj.card_id != battle_id]
         
-        # Add restored cards back to results
+        # Add restored cards
         for winner_id, card_bbox, winner_pos, winner_team in cards_to_restore:
             x, y, w, h = card_bbox
             box = self._bbox_to_box(card_bbox)
@@ -486,7 +587,6 @@ class CardDetector:
                 x, y, w, h = tracked_obj.bbox
                 tracked_obj.last_center = (x + w/2, y + h/2)
                 
-                # Save valid bbox and box for ghost display
                 if not tracked_obj.is_battle:
                     tracked_obj.last_valid_bbox = tracked_obj.bbox
                     tracked_obj.last_valid_box = self._bbox_to_box(tracked_obj.bbox)
@@ -553,26 +653,34 @@ class CardDetector:
                 
                 if w == 0 or h == 0: continue
                 
-                # Ensure we measure aspect with height as numerator
                 if h < w:
                     w, h = h, w
                 
-                aspect = h / w  # Height / Width
+                aspect = h / w
                 
-                # Check solidity
                 hull = cv2.convexHull(c)
                 hull_area = cv2.contourArea(hull)
                 solidity = area / hull_area if hull_area > 0 else 0
                 
-                if solidity < self.params.solidity_threshold:
-                    continue
+                # Check if in edge zone for stricter validation
+                center = rect[0]
+                in_edge = self._is_in_edge_zone(center)
+                
+                # Apply edge zone filtering
+                if in_edge:
+                    if solidity < self.params.edge_solidity_threshold:
+                        continue
+                    if area < self.params.edge_min_area:
+                        continue
+                else:
+                    if solidity < self.params.solidity_threshold:
+                        continue
                 
                 # Battle detection
                 if (self.params.battle_min_area <= area <= self.params.battle_max_area and 
                     self.params.battle_min_aspect <= aspect <= self.params.battle_max_aspect):
                     box = cv2.boxPoints(rect)
                     box = np.int32(box)
-                    center = rect[0]
                     
                     battle = Card(
                         box=box,
@@ -583,19 +691,19 @@ class CardDetector:
                     )
                     battles.append(battle)
                     
-                # Card detection - stricter
+                # Card detection
                 elif (self.params.min_area <= area <= self.params.max_area and 
                       self.params.min_aspect <= aspect <= self.params.max_aspect):
                     box = cv2.boxPoints(rect)
                     box = np.int32(box)
-                    center = rect[0]
                     
                     card = Card(
                         box=box,
                         center=center,
                         width=w,
                         height=h,
-                        is_battle=False
+                        is_battle=False,
+                        in_edge_zone=in_edge
                     )
                     cards.append(card)
         
@@ -651,7 +759,6 @@ class CardDetector:
                 tracked_obj.bbox = detection_bbox
                 tracked_obj.frames_lost = 0
                 
-                # Update last valid bbox
                 if not tracked_obj.is_battle:
                     tracked_obj.last_valid_bbox = detection_bbox
                     tracked_obj.last_valid_box = detection.box.copy()
@@ -662,7 +769,7 @@ class CardDetector:
                 result_objects.append(detection)
                 matched_ids.add(best_match_id)
             else:
-                # Check overlap with existing tracked cards before creating new
+                # New detection
                 overlaps_existing = False
                 if not detection.is_battle:
                     for tracked_obj in self.tracked_objects.values():
@@ -673,6 +780,10 @@ class CardDetector:
                             overlaps_existing = True
                             break
                 
+                # Skip new edge zone cards (they need confirmation)
+                if detection.in_edge_zone and not detection.is_battle:
+                    continue
+                
                 if not overlaps_existing:
                     if board_corners is None or self._is_fully_inside_board(detection, board_corners):
                         new_id = self.next_id
@@ -682,7 +793,6 @@ class CardDetector:
                         tracker = self._create_tracker()
                         tracker.init(frame, detection_bbox)
                         
-                        # Assign team for new cards
                         team = None
                         if not detection.is_battle:
                             team = self._assign_team(detection.center)
@@ -714,7 +824,8 @@ class CardDetector:
                             last_valid_bbox=detection_bbox if not detection.is_battle else None,
                             last_valid_box=detection.box.copy() if not detection.is_battle else None,
                             is_confirmed_battle=False,
-                            battle_confirmation_count=0
+                            battle_confirmation_count=0,
+                            in_edge_zone=detection.in_edge_zone if not detection.is_battle else False
                         )
                         
                         detection.card_id = new_id
@@ -753,7 +864,7 @@ class CardDetector:
             if obj_id in self.previous_card_positions:
                 del self.previous_card_positions[obj_id]
         
-        # Update previous positions for non-battle cards
+        # Update previous positions
         for obj in result_objects:
             if not obj.is_battle and obj.card_id:
                 self.previous_card_positions[obj.card_id] = obj.center

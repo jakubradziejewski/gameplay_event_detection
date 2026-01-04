@@ -8,7 +8,7 @@ from card_detector import CardDetector, DetectionParams
 from board_detector import BoardDetector
 
 # CONFIGURATION
-VIDEO_PATH = "data/easy/easy2.mp4"
+VIDEO_PATH = "data/hard/hard.mp4"
 OUTPUT_DIR = "output_video"
 SAVE_VIDEO = True
 
@@ -23,10 +23,9 @@ class GameEventTracker:
     def __init__(self):
         self.previous_cards = {}
         self.previous_battles = {}
-        self.active_battle_cards = set()
+        self.cards_in_active_battles = {}  # card_id -> battle_id
         self.events = deque(maxlen=5)
         self.movement_threshold = 30
-        self.battle_winners = {}
         
     def update(self, cards, battles, card_detector):
         """Update state and generate events"""
@@ -35,40 +34,9 @@ class GameEventTracker:
         new_events = []
         
         # Track which cards are currently in battles
-        cards_in_battle = set()
-        for battle in battles:
-            if battle.battle_ids:
-                cards_in_battle.update(battle.battle_ids)
+        current_cards_in_battle = set()
+        current_battle_map = {}  # card_id -> battle_id
         
-        # Track current cards (exclude ghosts from events)
-        for card in cards:
-            if card.is_ghost:
-                continue
-                
-            current_card_ids.add(card.card_id)
-            
-            # Skip movement tracking for cards in battle
-            if card.card_id in cards_in_battle:
-                continue
-            
-            if card.card_id not in self.previous_cards:
-                was_in_battle = card.card_id in self.active_battle_cards
-                if was_in_battle:
-                    team_text = f" (Team {card.team})" if card.team else ""
-                    new_events.append(f"Card {card.card_id}{team_text} wins the battle")
-                else:
-                    team_text = f" (Team {card.team})" if card.team else ""
-                    new_events.append(f"Card {card.card_id}{team_text} appears")
-            else:
-                prev_center = self.previous_cards[card.card_id]
-                dist = np.sqrt((card.center[0] - prev_center[0])**2 + 
-                             (card.center[1] - prev_center[1])**2)
-                if dist > self.movement_threshold:
-                    new_events.append(f"Card {card.card_id} moves")
-            
-            self.previous_cards[card.card_id] = card.center
-        
-        # Track battles
         for battle in battles:
             if battle.battle_ids:
                 tracked_obj = card_detector.tracked_objects.get(battle.card_id)
@@ -77,10 +45,14 @@ class GameEventTracker:
                 if tracked_obj and tracked_obj.is_confirmed_battle:
                     current_battle_ids.add(battle.card_id)
                     
+                    for card_id in battle.battle_ids:
+                        current_cards_in_battle.add(card_id)
+                        current_battle_map[card_id] = battle.card_id
+                    
+                    # New battle started
                     if battle.card_id not in self.previous_battles:
                         card1, card2 = battle.battle_ids
                         
-                        # Get team info for battle participants
                         team1 = card_detector.tracked_objects.get(card1)
                         team2 = card_detector.tracked_objects.get(card2)
                         team1_name = team1.team if team1 else "?"
@@ -89,42 +61,124 @@ class GameEventTracker:
                         new_events.append(f"Battle confirmed: {card1}({team1_name}) vs {card2}({team2_name})")
                         self.previous_battles[battle.card_id] = battle.battle_ids
                         
-                        self.active_battle_cards.add(card1)
-                        self.active_battle_cards.add(card2)
+                        # Mark cards as being in this battle
+                        self.cards_in_active_battles[card1] = battle.card_id
+                        self.cards_in_active_battles[card2] = battle.card_id
         
         # Check for battles that ended
         ended_battles = set(self.previous_battles.keys()) - current_battle_ids
+        
         for battle_id in ended_battles:
             card1, card2 = self.previous_battles[battle_id]
             
-            surviving_cards = [c for c in cards if c.card_id in [card1, card2] and not c.is_ghost]
+            # Check which cards survived
+            surviving_real_cards = [c for c in cards if c.card_id in [card1, card2] and not c.is_ghost]
+            all_visible_cards = [c for c in cards if c.card_id in [card1, card2]]  # Including ghosts
             
-            if len(surviving_cards) == 1:
-                winner = surviving_cards[0].card_id
-                loser = card1 if winner == card2 else card2
+            if len(surviving_real_cards) == 1:
+                # One card won
+                winner = surviving_real_cards[0]
+                loser_id = card1 if winner.card_id == card2 else card2
                 
-                winner_team = surviving_cards[0].team
+                winner_team = winner.team
                 team_text = f" (Team {winner_team})" if winner_team else ""
-                new_events.append(f"Card {loser} lost to {winner}{team_text}")
-                self.battle_winners[battle_id] = winner
                 
-                self.active_battle_cards.discard(loser)
+                # Get loser's team
+                loser_tracked = card_detector.tracked_objects.get(loser_id)
+                loser_team = None
+                if not loser_tracked:
+                    # Check if it was tracked before
+                    for prev_card_id, prev_pos in list(self.previous_cards.items()):
+                        if prev_card_id == loser_id:
+                            # Try to get team from previous state
+                            break
                 
-            elif len(surviving_cards) == 0:
-                new_events.append(f"Battle ended (both cards gone)")
-                self.active_battle_cards.discard(card1)
-                self.active_battle_cards.discard(card2)
+                new_events.append(f"Card {loser_id} lost battle to {winner.card_id}{team_text}")
+                
+                # Clear battle association
+                if loser_id in self.cards_in_active_battles:
+                    del self.cards_in_active_battles[loser_id]
+                if winner.card_id in self.cards_in_active_battles:
+                    del self.cards_in_active_battles[winner.card_id]
+                    
+            elif len(surviving_real_cards) == 0:
+                # Both cards gone - check if they're ghosts
+                if len(all_visible_cards) == 0:
+                    new_events.append(f"Battle cancelled (both cards removed)")
+                else:
+                    # Ghosts exist, battle likely still resolving
+                    pass
+                
+                # Clear battle associations
+                if card1 in self.cards_in_active_battles:
+                    del self.cards_in_active_battles[card1]
+                if card2 in self.cards_in_active_battles:
+                    del self.cards_in_active_battles[card2]
             
             del self.previous_battles[battle_id]
         
+        # Track current cards (exclude ghosts from most events)
+        for card in cards:
+            if card.is_ghost:
+                continue
+            
+            current_card_ids.add(card.card_id)
+            
+            # Skip movement tracking for cards currently in battle
+            if card.card_id in current_cards_in_battle:
+                continue
+            
+            # Check if this card was previously in a battle
+            was_in_battle = card.card_id in self.cards_in_active_battles
+            
+            if card.card_id not in self.previous_cards:
+                if was_in_battle:
+                    # Card reappeared after battle - must have won
+                    team_text = f" (Team {card.team})" if card.team else ""
+                    new_events.append(f"Card {card.card_id}{team_text} wins the battle")
+                    
+                    # Clear battle association
+                    del self.cards_in_active_battles[card.card_id]
+                else:
+                    # New card appears
+                    team_text = f" (Team {card.team})" if card.team else ""
+                    new_events.append(f"Card {card.card_id}{team_text} appears")
+            else:
+                # Card was visible before
+                prev_center = self.previous_cards[card.card_id]
+                dist = np.sqrt((card.center[0] - prev_center[0])**2 + 
+                             (card.center[1] - prev_center[1])**2)
+                
+                if was_in_battle and dist > self.movement_threshold:
+                    # Card moved significantly while in battle = fled/lost
+                    new_events.append(f"Card {card.card_id} fled the battle")
+                    del self.cards_in_active_battles[card.card_id]
+                elif not was_in_battle and dist > self.movement_threshold:
+                    # Normal movement
+                    new_events.append(f"Card {card.card_id} moves")
+            
+            self.previous_cards[card.card_id] = card.center
+        
         # Check for cards that disappeared
         disappeared_cards = set(self.previous_cards.keys()) - current_card_ids
+        
         for card_id in disappeared_cards:
-            if card_id not in cards_in_battle and card_id not in self.active_battle_cards:
+            # Don't report disappearance if card is currently in a battle
+            if card_id in current_cards_in_battle:
+                continue
+            
+            # Check if card was in a battle and disappeared
+            was_in_battle = card_id in self.cards_in_active_battles
+            
+            if was_in_battle:
+                # Card was in battle and disappeared = lost
+                new_events.append(f"Card {card_id} lost battle (removed)")
+                del self.cards_in_active_battles[card_id]
+            else:
+                # Normal disappearance
                 new_events.append(f"Card {card_id} disappears")
             
-            if card_id not in cards_in_battle:
-                del self.previous_cards[card_id]
+            del self.previous_cards[card_id]
         
         # Add new events to queue
         for event in new_events:
@@ -165,7 +219,6 @@ def draw_events(frame, events, height):
 
 def draw_scoreboard(frame, scores, width):
     """Draw team scores at the top of the frame"""
-    # Scoreboard background
     board_height = 60
     overlay = frame.copy()
     cv2.rectangle(overlay, (0, 0), (width, board_height), (0, 0, 0), -1)
@@ -231,6 +284,31 @@ def draw_battle_status(frame, battle, tracked_obj):
             cv2.putText(frame, line, (text_x, text_y),
                        font, font_scale, (255, 255, 0), thickness)
 
+def draw_edge_buffer_zone(frame, card_detector):
+    """Draw the edge buffer zone for debugging"""
+    if card_detector.edge_buffer is None:
+        return
+    
+    eb = card_detector.edge_buffer
+    
+    # Draw outer boundary (board edge) in yellow
+    outer_pts = np.array([
+        [eb['x_min'], eb['y_min']],
+        [eb['x_max'], eb['y_min']],
+        [eb['x_max'], eb['y_max']],
+        [eb['x_min'], eb['y_max']]
+    ], dtype=np.int32)
+    cv2.polylines(frame, [outer_pts], True, (0, 255, 255), 1)
+    
+    # Draw inner boundary (safe zone) in cyan
+    inner_pts = np.array([
+        [eb['inner_x_min'], eb['inner_y_min']],
+        [eb['inner_x_max'], eb['inner_y_min']],
+        [eb['inner_x_max'], eb['inner_y_max']],
+        [eb['inner_x_min'], eb['inner_y_max']]
+    ], dtype=np.int32)
+    cv2.polylines(frame, [inner_pts], True, (255, 255, 0), 1)
+
 def main():
     video_path = Path(VIDEO_PATH)
     output_dir = Path(OUTPUT_DIR)
@@ -283,15 +361,19 @@ def main():
     print(f"Detection parameters:")
     print(f"  - Card area: {card_detector.params.min_area}-{card_detector.params.max_area}")
     print(f"  - Card aspect: {card_detector.params.min_aspect}-{card_detector.params.max_aspect} (height/width)")
-    print(f"  - Battle end threshold: {card_detector.battle_end_threshold} frames")
-    print(f"  - Battle noise threshold: {card_detector.battle_noise_threshold} frames")
-    print(f"  - Max overlap for new cards: {card_detector.max_new_card_overlap * 100}%")
+    print(f"  - Edge buffer: {card_detector.params.edge_buffer_percent * 100}%")
+    print(f"  - Edge zone min area: {card_detector.params.edge_min_area}")
+    print(f"  - Edge zone solidity: {card_detector.params.edge_solidity_threshold}")
+    print(f"  - Battle confirmation: {card_detector.params.battle_confirmation_frames} frames")
     
     start_time = time.time()
 
     frame_count = 0
     cards_detected_total = 0
     battles_detected_total = 0
+    
+    # Debug mode - set to True to visualize edge zones
+    DEBUG_EDGE_ZONES = False
     
     while cap.isOpened():
         ret, frame = cap.read()
@@ -305,7 +387,7 @@ def main():
         else:
             current_board = board_corners
         
-        # Detect cards on full frame, then filter to board
+        # Detect cards
         cards, battles = card_detector.detect_cards(frame, current_board)
         
         # Get team scores
@@ -330,15 +412,19 @@ def main():
             cv2.putText(frame, "Board", 
                        (board_int[0][0] + 10, board_int[0][1] + 30),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+        
+        # Debug: Draw edge buffer zones
+        if DEBUG_EDGE_ZONES:
+            draw_edge_buffer_zone(frame, card_detector)
 
         # Draw battle pairs with status
         for battle in battles:
             tracked_obj = card_detector.tracked_objects.get(battle.card_id)
             
-            # Use different color for unconfirmed battles
+            # Different color for unconfirmed battles
             if tracked_obj and not tracked_obj.is_confirmed_battle:
                 battle_color = (0, 165, 255)  # Orange for unconfirmed
-                cv2.drawContours(frame, [battle.box], 0, battle_color, 2)  # Thinner line
+                cv2.drawContours(frame, [battle.box], 0, battle_color, 2)
             else:
                 battle_color = (0, 0, 255)  # Red for confirmed
                 cv2.drawContours(frame, [battle.box], 0, battle_color, 3)
@@ -346,7 +432,6 @@ def main():
             top_point = get_top_point(battle.box)
             
             if battle.battle_ids:
-                # Get team info for battle participants
                 team1 = card_detector.tracked_objects.get(battle.battle_ids[0])
                 team2 = card_detector.tracked_objects.get(battle.battle_ids[1])
                 team1_name = team1.team if team1 else "?"
@@ -377,7 +462,7 @@ def main():
             cv2.putText(frame, text, (text_x, text_y), 
                        font, font_scale, battle_color, thickness)
             
-            # Draw battle status (only for confirmed battles)
+            # Draw battle status (only for confirmed)
             if tracked_obj and tracked_obj.is_confirmed_battle:
                 draw_battle_status(frame, battle, tracked_obj)
 
@@ -392,13 +477,17 @@ def main():
                 cv2.drawContours(overlay, [card.box], 0, (128, 128, 128), 2)
                 cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
             else:
-                cv2.drawContours(frame, [card.box], 0, color, 3)
+                # Draw thicker border for edge zone cards
+                thickness = 2 if card.in_edge_zone else 3
+                cv2.drawContours(frame, [card.box], 0, color, thickness)
             
             top_point = get_top_point(card.box)
             team_text = f" ({card.team})" if card.team else ""
             label = f"Card {card.card_id}{team_text}"
             if card.is_ghost:
                 label += " [ghost]"
+            if card.in_edge_zone and not card.is_ghost:
+                label += " [edge]"
             
             font = cv2.FONT_HERSHEY_SIMPLEX
             font_scale = 0.6
