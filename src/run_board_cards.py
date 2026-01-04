@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import cv2
 import time
 import numpy as np
@@ -8,7 +7,7 @@ from card_detector import CardDetector
 from board_detector import BoardDetector
 
 # Configuration
-VIDEO_PATH = "data/easy/easy.mp4"
+VIDEO_PATH = "data/hard/hard.mp4"
 OUTPUT_DIR = "output_video"
 TEAM_COLORS = {'A': (255, 0, 0), 'B': (0, 255, 0)}
 
@@ -16,14 +15,12 @@ class GameEventTracker:
     def __init__(self):
         self.previous_cards = {}
         self.previous_battles = {}
-        self.cards_in_battles = {}
+        self.battle_participants = {}  # Maps battle_id -> {c1, c2, team1, team2}
         self.events = deque(maxlen=5)
         
     def update(self, cards, battles, detector):
         current_cards = set()
         current_battles = set()
-        current_battle_cards = set()
-        current_battle_map = {}
         new_events = []
         
         # Track confirmed battles
@@ -32,75 +29,81 @@ class GameEventTracker:
                 tracked = detector.tracked_objects.get(battle.card_id)
                 if tracked and tracked.is_confirmed_battle:
                     current_battles.add(battle.card_id)
-                    for cid in battle.battle_ids:
-                        current_battle_cards.add(cid)
-                        current_battle_map[cid] = battle.card_id
                     
+                    # New battle started
                     if battle.card_id not in self.previous_battles:
                         c1, c2 = battle.battle_ids
                         t1 = detector.tracked_objects.get(c1)
                         t2 = detector.tracked_objects.get(c2)
-                        new_events.append(f"Battle: {c1}({t1.team if t1 else '?'}) vs {c2}({t2.team if t2 else '?'})")
+                        team1 = t1.team if t1 else '?'
+                        team2 = t2.team if t2 else '?'
+                        
+                        new_events.append(f"Battle: Card {c1} (Team {team1}) vs Card {c2} (Team {team2})")
+                        
                         self.previous_battles[battle.card_id] = battle.battle_ids
-                        self.cards_in_battles[c1] = battle.card_id
-                        self.cards_in_battles[c2] = battle.card_id
+                        self.battle_participants[battle.card_id] = {
+                            'c1': c1, 'c2': c2, 
+                            'team1': team1, 'team2': team2
+                        }
         
         # Check ended battles
-        for bid in set(self.previous_battles.keys()) - current_battles:
+        ended_battles = set(self.previous_battles.keys()) - current_battles
+        for bid in ended_battles:
             c1, c2 = self.previous_battles[bid]
+            info = self.battle_participants.get(bid)
+            
+            # Check which cards still exist
             real_survivors = [c for c in cards if c.card_id in [c1, c2] and not c.is_ghost]
             
             if len(real_survivors) == 1:
                 winner = real_survivors[0]
-                loser = c1 if winner.card_id == c2 else c2
-                new_events.append(f"Card {loser} lost to {winner.card_id} (Team {winner.team})")
-                self.cards_in_battles.pop(loser, None)
-                self.cards_in_battles.pop(winner.card_id, None)
-            elif len(real_survivors) == 0:
-                new_events.append(f"Battle cancelled")
-                self.cards_in_battles.pop(c1, None)
-                self.cards_in_battles.pop(c2, None)
+                new_events.append(f"Battle won by Card {winner.card_id} (Team {winner.team})")
+            elif len(real_survivors) == 2:
+                # Both cards still exist, battle somehow ended without resolution
+                pass
+            # If no survivors, we also don't report anything (rare edge case)
+            
             del self.previous_battles[bid]
+            if bid in self.battle_participants:
+                del self.battle_participants[bid]
         
-        # Track cards
+        # Track card appearances and movements (excluding cards in active battles)
+        active_battle_cards = set()
+        for bid in current_battles:
+            if bid in self.previous_battles:
+                c1, c2 = self.previous_battles[bid]
+                active_battle_cards.add(c1)
+                active_battle_cards.add(c2)
+        
         for card in cards:
             if card.is_ghost:
                 continue
-            current_cards.add(card.card_id)
-            if card.card_id in current_battle_cards:
-                continue
             
-            was_in_battle = card.card_id in self.cards_in_battles
+            current_cards.add(card.card_id)
+            # Skip cards that are currently in battles
+            if card.card_id in active_battle_cards:
+                continue
             if card.card_id not in self.previous_cards:
-                if was_in_battle:
-                    new_events.append(f"Card {card.card_id} (Team {card.team}) wins")
-                    del self.cards_in_battles[card.card_id]
-                else:
-                    new_events.append(f"Card {card.card_id} (Team {card.team}) appears")
+                # New card appeared
+                new_events.append(f"Card {card.card_id} (Team {card.team}) appears")
             else:
+                # Check if card moved significantly
                 prev = self.previous_cards[card.card_id]
                 dist = np.sqrt((card.center[0]-prev[0])**2 + (card.center[1]-prev[1])**2)
                 if dist > 30:
-                    if was_in_battle:
-                        new_events.append(f"Card {card.card_id} fled")
-                        del self.cards_in_battles[card.card_id]
-                    else:
-                        new_events.append(f"Card {card.card_id} moves")
+                    new_events.append(f"Card {card.card_id} (Team {card.team}) moves")
+            
             self.previous_cards[card.card_id] = card.center
         
-        # Check disappeared cards
-        for cid in set(self.previous_cards.keys()) - current_cards:
-            if cid in current_battle_cards:
-                continue
-            if cid in self.cards_in_battles:
-                new_events.append(f"Card {cid} lost (removed)")
-                del self.cards_in_battles[cid]
-            else:
-                new_events.append(f"Card {cid} disappears")
+        # Clean up tracking for cards that are no longer visible
+        disappeared_cards = set(self.previous_cards.keys()) - current_cards
+        for cid in disappeared_cards:
             del self.previous_cards[cid]
         
+        # Add new events to the queue
         for event in new_events:
             self.events.append(event)
+        
         return list(self.events)
 
 def draw_text_with_bg(frame, text, pos, color, font_scale=0.7, thickness=2, bg_alpha=0.7):
@@ -152,14 +155,12 @@ def main():
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     print(f"Processing {total} frames...")
-    print("Step 1: Calibrating board...")
-    
     board_detector = BoardDetector(str(video_path))
     ret, first = cap.read()
     if not ret:
         return
     board = board_detector.calibrate(first)
-    print(f"✓ Board detected: {board.astype(int).tolist() if board is not None else 'Full frame'}")
+    print(f"Board detected: {board.astype(int).tolist() if board is not None else 'Full frame'}")
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     
     out = cv2.VideoWriter(str(output_dir / f"detected_{video_path.stem}.mp4"),
@@ -167,8 +168,7 @@ def main():
 
     detector = CardDetector()
     tracker = GameEventTracker()
-    
-    print("Step 2: Processing frames...")
+
     print(f"Parameters: Card area={detector.params.min_area}-{detector.params.max_area}, "
           f"Aspect={detector.params.min_aspect:.1f}-{detector.params.max_aspect:.1f}, "
           f"Edge buffer X={detector.params.edge_buffer_x*100:.0f}% Y={detector.params.edge_buffer_y*100:.0f}%")
@@ -188,6 +188,7 @@ def main():
         scores = detector.get_team_scores(cards, battles)
         events = tracker.update(cards, battles, detector)
         
+        # Filter out ghost cards for rendering
         real_cards = [c for c in cards if not c.is_ghost]
         
         draw_scoreboard(frame, scores, width)
@@ -197,12 +198,12 @@ def main():
             cv2.putText(frame, "Board", (int(curr_board[0][0]+10), int(curr_board[0][1]+30)),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
-        # Draw battles
         for battle in battles:
             tracked = detector.tracked_objects.get(battle.card_id)
             confirmed = tracked and tracked.is_confirmed_battle
             if not confirmed:
-                continue    
+                continue
+            
             color = (0, 0, 255)
             cv2.drawContours(frame, [battle.box], 0, color, 3)
             
@@ -212,60 +213,46 @@ def main():
                 t2 = detector.tracked_objects.get(battle.battle_ids[1])
                 team1 = t1.team if t1 else "?"
                 team2 = t2.team if t2 else "?"
-                if not confirmed:
-                    cnt = tracked.battle_confirmation_count
-                    text = f"Battle? {battle.battle_ids[0]}({team1}) vs {battle.battle_ids[1]}({team2}) [{cnt}/{detector.params.battle_confirmation_frames}]"
-                else:
-                    text = f"Battle {battle.battle_ids[0]}({team1}) vs {battle.battle_ids[1]}({team2})"
+                text = f"Battle {battle.battle_ids[0]}({team1}) vs {battle.battle_ids[1]}({team2})"
             else:
                 text = "Battle"
             
             (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
             draw_text_with_bg(frame, text, (top[0]-tw//2, top[1]-10), color)
 
-        # Draw cards
-        for card in cards:
+        for card in real_cards:
             color = TEAM_COLORS.get(card.team, (0, 255, 0))
-            if card.is_ghost:
-                overlay = frame.copy()
-                cv2.drawContours(overlay, [card.box], 0, (128, 128, 128), 2)
-                cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
-            else:
-                cv2.drawContours(frame, [card.box], 0, color, 2 if card.in_edge_zone else 3)
+            cv2.drawContours(frame, [card.box], 0, color, 2 if card.in_edge_zone else 3)
             
             top = get_top_point(card.box)
             label = f"Card {card.card_id}"
             if card.team:
                 label += f" ({card.team})"
-            if card.is_ghost:
-                label += " [ghost]"
-            elif card.in_edge_zone:
+            if card.in_edge_zone:
                 label += " [edge]"
             
             (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-            lcolor = (128, 128, 128) if card.is_ghost else color
-            draw_text_with_bg(frame, label, (top[0]-tw//2, top[1]-10), lcolor,
-                            font_scale=0.6, bg_alpha=0.5 if card.is_ghost else 1.0)
+            draw_text_with_bg(frame, label, (top[0]-tw//2, top[1]-10), color, font_scale=0.6)
 
         draw_events(frame, events, width)
         
         stats = f"Frame: {frame_count}/{total} | Cards: {len(real_cards)} | Battles: {len(battles)}"
         cv2.putText(frame, stats, (10, height-20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-
         out.write(frame)
 
         frame_count += 1
-        if frame_count % 30 == 0:
+        if frame_count % 50 == 0:
             elapsed = time.time() - start
             print(f"Frame {frame_count}/{total} | Speed: {frame_count/elapsed:.2f} fps | "
                   f"Score A:{scores['A']} B:{scores['B']}")
+    
     cap.release()
     out.release()
     
     elapsed = time.time() - start
 
-    print("Summary:")
+    print("\nSummary:")
     print(f"Frames: {frame_count} | Time: {elapsed:.2f}s ({frame_count/elapsed:.2f} fps)")
     print(f"Final Score - Team A: {scores['A']}, Team B: {scores['B']}")
     print(f"Output: {output_dir / f'detected_{video_path.stem}.mp4'}")
