@@ -4,310 +4,134 @@ import time
 import numpy as np
 from pathlib import Path
 from collections import deque
-from card_detector import CardDetector, DetectionParams
+from card_detector import CardDetector
 from board_detector import BoardDetector
 
-# CONFIGURATION
-VIDEO_PATH = "data/hard/hard.mp4"
+# Configuration
+VIDEO_PATH = "data/medium/medium.mp4"
 OUTPUT_DIR = "output_video"
 SAVE_VIDEO = True
-
-# Team colors (BGR format for OpenCV)
-TEAM_COLORS = {
-    'A': (255, 0, 0),    # Blue
-    'B': (0, 255, 0)     # Green
-}
+TEAM_COLORS = {'A': (255, 0, 0), 'B': (0, 255, 0)}
 
 class GameEventTracker:
-    """Track game events like card appearances, movements, battles"""
     def __init__(self):
         self.previous_cards = {}
         self.previous_battles = {}
-        self.cards_in_active_battles = {}  # card_id -> battle_id
+        self.cards_in_battles = {}
         self.events = deque(maxlen=5)
-        self.movement_threshold = 30
         
-    def update(self, cards, battles, card_detector):
-        """Update state and generate events"""
-        current_card_ids = set()
-        current_battle_ids = set()
+    def update(self, cards, battles, detector):
+        current_cards = set()
+        current_battles = set()
+        current_battle_cards = set()
+        current_battle_map = {}
         new_events = []
         
-        # Track which cards are currently in battles
-        current_cards_in_battle = set()
-        current_battle_map = {}  # card_id -> battle_id
-        
+        # Track confirmed battles
         for battle in battles:
             if battle.battle_ids:
-                tracked_obj = card_detector.tracked_objects.get(battle.card_id)
-                
-                # Only track confirmed battles
-                if tracked_obj and tracked_obj.is_confirmed_battle:
-                    current_battle_ids.add(battle.card_id)
+                tracked = detector.tracked_objects.get(battle.card_id)
+                if tracked and tracked.is_confirmed_battle:
+                    current_battles.add(battle.card_id)
+                    for cid in battle.battle_ids:
+                        current_battle_cards.add(cid)
+                        current_battle_map[cid] = battle.card_id
                     
-                    for card_id in battle.battle_ids:
-                        current_cards_in_battle.add(card_id)
-                        current_battle_map[card_id] = battle.card_id
-                    
-                    # New battle started
                     if battle.card_id not in self.previous_battles:
-                        card1, card2 = battle.battle_ids
-                        
-                        team1 = card_detector.tracked_objects.get(card1)
-                        team2 = card_detector.tracked_objects.get(card2)
-                        team1_name = team1.team if team1 else "?"
-                        team2_name = team2.team if team2 else "?"
-                        
-                        new_events.append(f"Battle confirmed: {card1}({team1_name}) vs {card2}({team2_name})")
+                        c1, c2 = battle.battle_ids
+                        t1 = detector.tracked_objects.get(c1)
+                        t2 = detector.tracked_objects.get(c2)
+                        new_events.append(f"Battle: {c1}({t1.team if t1 else '?'}) vs {c2}({t2.team if t2 else '?'})")
                         self.previous_battles[battle.card_id] = battle.battle_ids
-                        
-                        # Mark cards as being in this battle
-                        self.cards_in_active_battles[card1] = battle.card_id
-                        self.cards_in_active_battles[card2] = battle.card_id
+                        self.cards_in_battles[c1] = battle.card_id
+                        self.cards_in_battles[c2] = battle.card_id
         
-        # Check for battles that ended
-        ended_battles = set(self.previous_battles.keys()) - current_battle_ids
+        # Check ended battles
+        for bid in set(self.previous_battles.keys()) - current_battles:
+            c1, c2 = self.previous_battles[bid]
+            real_survivors = [c for c in cards if c.card_id in [c1, c2] and not c.is_ghost]
+            
+            if len(real_survivors) == 1:
+                winner = real_survivors[0]
+                loser = c1 if winner.card_id == c2 else c2
+                new_events.append(f"Card {loser} lost to {winner.card_id} (Team {winner.team})")
+                self.cards_in_battles.pop(loser, None)
+                self.cards_in_battles.pop(winner.card_id, None)
+            elif len(real_survivors) == 0:
+                new_events.append(f"Battle cancelled")
+                self.cards_in_battles.pop(c1, None)
+                self.cards_in_battles.pop(c2, None)
+            del self.previous_battles[bid]
         
-        for battle_id in ended_battles:
-            card1, card2 = self.previous_battles[battle_id]
-            
-            # Check which cards survived
-            surviving_real_cards = [c for c in cards if c.card_id in [card1, card2] and not c.is_ghost]
-            all_visible_cards = [c for c in cards if c.card_id in [card1, card2]]  # Including ghosts
-            
-            if len(surviving_real_cards) == 1:
-                # One card won
-                winner = surviving_real_cards[0]
-                loser_id = card1 if winner.card_id == card2 else card2
-                
-                winner_team = winner.team
-                team_text = f" (Team {winner_team})" if winner_team else ""
-                
-                # Get loser's team
-                loser_tracked = card_detector.tracked_objects.get(loser_id)
-                loser_team = None
-                if not loser_tracked:
-                    # Check if it was tracked before
-                    for prev_card_id, prev_pos in list(self.previous_cards.items()):
-                        if prev_card_id == loser_id:
-                            # Try to get team from previous state
-                            break
-                
-                new_events.append(f"Card {loser_id} lost battle to {winner.card_id}{team_text}")
-                
-                # Clear battle association
-                if loser_id in self.cards_in_active_battles:
-                    del self.cards_in_active_battles[loser_id]
-                if winner.card_id in self.cards_in_active_battles:
-                    del self.cards_in_active_battles[winner.card_id]
-                    
-            elif len(surviving_real_cards) == 0:
-                # Both cards gone - check if they're ghosts
-                if len(all_visible_cards) == 0:
-                    new_events.append(f"Battle cancelled (both cards removed)")
-                else:
-                    # Ghosts exist, battle likely still resolving
-                    pass
-                
-                # Clear battle associations
-                if card1 in self.cards_in_active_battles:
-                    del self.cards_in_active_battles[card1]
-                if card2 in self.cards_in_active_battles:
-                    del self.cards_in_active_battles[card2]
-            
-            del self.previous_battles[battle_id]
-        
-        # Track current cards (exclude ghosts from most events)
+        # Track cards
         for card in cards:
             if card.is_ghost:
                 continue
-            
-            current_card_ids.add(card.card_id)
-            
-            # Skip movement tracking for cards currently in battle
-            if card.card_id in current_cards_in_battle:
+            current_cards.add(card.card_id)
+            if card.card_id in current_battle_cards:
                 continue
             
-            # Check if this card was previously in a battle
-            was_in_battle = card.card_id in self.cards_in_active_battles
-            
+            was_in_battle = card.card_id in self.cards_in_battles
             if card.card_id not in self.previous_cards:
                 if was_in_battle:
-                    # Card reappeared after battle - must have won
-                    team_text = f" (Team {card.team})" if card.team else ""
-                    new_events.append(f"Card {card.card_id}{team_text} wins the battle")
-                    
-                    # Clear battle association
-                    del self.cards_in_active_battles[card.card_id]
+                    new_events.append(f"Card {card.card_id} (Team {card.team}) wins")
+                    del self.cards_in_battles[card.card_id]
                 else:
-                    # New card appears
-                    team_text = f" (Team {card.team})" if card.team else ""
-                    new_events.append(f"Card {card.card_id}{team_text} appears")
+                    new_events.append(f"Card {card.card_id} (Team {card.team}) appears")
             else:
-                # Card was visible before
-                prev_center = self.previous_cards[card.card_id]
-                dist = np.sqrt((card.center[0] - prev_center[0])**2 + 
-                             (card.center[1] - prev_center[1])**2)
-                
-                if was_in_battle and dist > self.movement_threshold:
-                    # Card moved significantly while in battle = fled/lost
-                    new_events.append(f"Card {card.card_id} fled the battle")
-                    del self.cards_in_active_battles[card.card_id]
-                elif not was_in_battle and dist > self.movement_threshold:
-                    # Normal movement
-                    new_events.append(f"Card {card.card_id} moves")
-            
+                prev = self.previous_cards[card.card_id]
+                dist = np.sqrt((card.center[0]-prev[0])**2 + (card.center[1]-prev[1])**2)
+                if dist > 30:
+                    if was_in_battle:
+                        new_events.append(f"Card {card.card_id} fled")
+                        del self.cards_in_battles[card.card_id]
+                    else:
+                        new_events.append(f"Card {card.card_id} moves")
             self.previous_cards[card.card_id] = card.center
         
-        # Check for cards that disappeared
-        disappeared_cards = set(self.previous_cards.keys()) - current_card_ids
-        
-        for card_id in disappeared_cards:
-            # Don't report disappearance if card is currently in a battle
-            if card_id in current_cards_in_battle:
+        # Check disappeared cards
+        for cid in set(self.previous_cards.keys()) - current_cards:
+            if cid in current_battle_cards:
                 continue
-            
-            # Check if card was in a battle and disappeared
-            was_in_battle = card_id in self.cards_in_active_battles
-            
-            if was_in_battle:
-                # Card was in battle and disappeared = lost
-                new_events.append(f"Card {card_id} lost battle (removed)")
-                del self.cards_in_active_battles[card_id]
+            if cid in self.cards_in_battles:
+                new_events.append(f"Card {cid} lost (removed)")
+                del self.cards_in_battles[cid]
             else:
-                # Normal disappearance
-                new_events.append(f"Card {card_id} disappears")
-            
-            del self.previous_cards[card_id]
+                new_events.append(f"Card {cid} disappears")
+            del self.previous_cards[cid]
         
-        # Add new events to queue
         for event in new_events:
             self.events.append(event)
-        
         return list(self.events)
 
-def get_top_point(box):
-    """Get the topmost point of a bounding box for label placement"""
-    top_idx = np.argmin(box[:, 1])
-    return box[top_idx]
+def draw_text_with_bg(frame, text, pos, color, font_scale=0.7, thickness=2, bg_alpha=0.7):
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    (tw, th), _ = cv2.getTextSize(text, font, font_scale, thickness)
+    x, y = pos
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (x-5, y-th-5), (x+tw+5, y+5), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, bg_alpha, frame, 1-bg_alpha, 0, frame)
+    cv2.putText(frame, text, (x, y), font, font_scale, color, thickness)
 
-def draw_events(frame, events, height):
-    """Draw event messages on frame"""
-    y_offset = 50
+def draw_events(frame, events):
     for i, event in enumerate(reversed(events)):
         alpha = 1.0 - (i * 0.15)
-        
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.7
-        thickness = 2
-        
-        (text_width, text_height), _ = cv2.getTextSize(event, font, font_scale, thickness)
-        
-        x_pos = 10
-        y_pos = y_offset + (i * 35)
-        
-        overlay = frame.copy()
-        cv2.rectangle(overlay,
-                     (x_pos - 5, y_pos - text_height - 5),
-                     (x_pos + text_width + 10, y_pos + 5),
-                     (0, 0, 0), -1)
-        cv2.addWeighted(overlay, alpha * 0.7, frame, 1 - alpha * 0.7, 0, frame)
-        
         color = tuple(int(c * alpha) for c in [255, 255, 255])
-        cv2.putText(frame, event, (x_pos, y_pos),
-                   font, font_scale, color, thickness)
+        draw_text_with_bg(frame, event, (10, 50 + i*35), color, bg_alpha=alpha*0.7)
 
 def draw_scoreboard(frame, scores, width):
-    """Draw team scores at the top of the frame"""
-    board_height = 60
     overlay = frame.copy()
-    cv2.rectangle(overlay, (0, 0), (width, board_height), (0, 0, 0), -1)
+    cv2.rectangle(overlay, (0, 0), (width, 60), (0, 0, 0), -1)
     cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
     
     font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 1.2
-    thickness = 3
-    
-    # Team A (Blue) on the left
-    team_a_text = f"Team A: {scores['A']}"
-    (text_width_a, text_height_a), _ = cv2.getTextSize(team_a_text, font, font_scale, thickness)
-    x_a = 50
-    y_a = 40
-    cv2.putText(frame, team_a_text, (x_a, y_a), font, font_scale, TEAM_COLORS['A'], thickness)
-    
-    # Team B (Green) on the right
-    team_b_text = f"Team B: {scores['B']}"
-    (text_width_b, text_height_b), _ = cv2.getTextSize(team_b_text, font, font_scale, thickness)
-    x_b = width - text_width_b - 50
-    y_b = 40
-    cv2.putText(frame, team_b_text, (x_b, y_b), font, font_scale, TEAM_COLORS['B'], thickness)
-    
-    # Draw divider line
-    cv2.line(frame, (width // 2, 0), (width // 2, board_height), (255, 255, 255), 2)
+    cv2.putText(frame, f"Team A: {scores['A']}", (50, 40), font, 1.2, TEAM_COLORS['A'], 3)
+    (tw, _), _ = cv2.getTextSize(f"Team B: {scores['B']}", font, 1.2, 3)
+    cv2.putText(frame, f"Team B: {scores['B']}", (width-tw-50, 40), font, 1.2, TEAM_COLORS['B'], 3)
+    cv2.line(frame, (width//2, 0), (width//2, 60), (255, 255, 255), 2)
 
-def draw_battle_status(frame, battle, tracked_obj):
-    """Draw battle status information"""
-    if tracked_obj is None:
-        return
-    
-    status_lines = []
-    
-    if tracked_obj.frames_both_missing > 0:
-        status_lines.append(f"Occluded: {tracked_obj.frames_both_missing}f")
-    
-    if tracked_obj.frames_one_missing > 0:
-        missing_id = tracked_obj.missing_card_id
-        remaining = CardDetector().battle_end_threshold - tracked_obj.frames_one_missing
-        status_lines.append(f"Card {missing_id} missing: {tracked_obj.frames_one_missing}f")
-        if remaining > 0:
-            status_lines.append(f"Ending in: {remaining}f")
-    
-    if status_lines:
-        bx, by, bw, bh = tracked_obj.bbox
-        status_y = by + bh + 20
-        
-        for i, line in enumerate(status_lines):
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 0.5
-            thickness = 1
-            
-            (text_width, text_height), _ = cv2.getTextSize(line, font, font_scale, thickness)
-            
-            text_x = bx
-            text_y = status_y + (i * 20)
-            
-            cv2.rectangle(frame,
-                         (text_x - 3, text_y - text_height - 3),
-                         (text_x + text_width + 3, text_y + 3),
-                         (0, 0, 0), -1)
-            
-            cv2.putText(frame, line, (text_x, text_y),
-                       font, font_scale, (255, 255, 0), thickness)
-
-def draw_edge_buffer_zone(frame, card_detector):
-    """Draw the edge buffer zone for debugging"""
-    if card_detector.edge_buffer is None:
-        return
-    
-    eb = card_detector.edge_buffer
-    
-    # Draw outer boundary (board edge) in yellow
-    outer_pts = np.array([
-        [eb['x_min'], eb['y_min']],
-        [eb['x_max'], eb['y_min']],
-        [eb['x_max'], eb['y_max']],
-        [eb['x_min'], eb['y_max']]
-    ], dtype=np.int32)
-    cv2.polylines(frame, [outer_pts], True, (0, 255, 255), 1)
-    
-    # Draw inner boundary (safe zone) in cyan
-    inner_pts = np.array([
-        [eb['inner_x_min'], eb['inner_y_min']],
-        [eb['inner_x_max'], eb['inner_y_min']],
-        [eb['inner_x_max'], eb['inner_y_max']],
-        [eb['inner_x_min'], eb['inner_y_max']]
-    ], dtype=np.int32)
-    cv2.polylines(frame, [inner_pts], True, (255, 255, 0), 1)
+def get_top_point(box):
+    return box[np.argmin(box[:, 1])]
 
 def main():
     video_path = Path(VIDEO_PATH)
@@ -319,231 +143,135 @@ def main():
         print(f"Error: Could not open {video_path}")
         return
 
-    # Video Properties
-    width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps    = cap.get(cv2.CAP_PROP_FPS)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    print(f"Processing {total_frames} frames...")
-    print("Step 1: Calibrating board detection...")
+    print(f"Processing {total} frames...")
+    print("Step 1: Calibrating board...")
     
-    # Initialize board detector
     board_detector = BoardDetector(str(video_path))
-    
-    # Calibrate with first frame
-    ret, first_frame = cap.read()
+    ret, first = cap.read()
     if not ret:
-        print("Error: Could not read first frame")
         return
-    
-    board_corners = board_detector.calibrate(first_frame)
-    
-    if board_corners is None:
-        print("Warning: Could not detect board. Processing entire frame.")
-    else:
-        print(f"✓ Board detected: {board_corners.astype(int).tolist()}")
-    
-    # Reset video to start
+    board = board_detector.calibrate(first)
+    print(f"✓ Board detected: {board.astype(int).tolist() if board is not None else 'Full frame'}")
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     
-    # Initialize Video Writer
     if SAVE_VIDEO:
-        out_name = output_dir / f"detected_{video_path.stem}.mp4"
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        writer = cv2.VideoWriter(str(out_name), fourcc, fps, (width, height))
+        out = cv2.VideoWriter(str(output_dir / f"detected_{video_path.stem}.mp4"),
+                             cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
 
-    # Initialize card detector and event tracker
-    card_detector = CardDetector()
-    event_tracker = GameEventTracker()
+    detector = CardDetector()
+    tracker = GameEventTracker()
     
-    print("Step 2: Processing frames with improved card detection...")
-    print(f"Detection parameters:")
-    print(f"  - Card area: {card_detector.params.min_area}-{card_detector.params.max_area}")
-    print(f"  - Card aspect: {card_detector.params.min_aspect}-{card_detector.params.max_aspect} (height/width)")
-    print(f"  - Edge buffer: {card_detector.params.edge_buffer_percent * 100}%")
-    print(f"  - Edge zone min area: {card_detector.params.edge_min_area}")
-    print(f"  - Edge zone solidity: {card_detector.params.edge_solidity_threshold}")
-    print(f"  - Battle confirmation: {card_detector.params.battle_confirmation_frames} frames")
+    print("Step 2: Processing frames...")
+    print(f"Parameters: Card area={detector.params.min_area}-{detector.params.max_area}, "
+          f"Aspect={detector.params.min_aspect:.1f}-{detector.params.max_aspect:.1f}, "
+          f"Edge buffer X={detector.params.edge_buffer_x*100:.0f}% Y={detector.params.edge_buffer_y*100:.0f}%")
     
-    start_time = time.time()
-
-    frame_count = 0
-    cards_detected_total = 0
-    battles_detected_total = 0
-    
-    # Debug mode - set to True to visualize edge zones
-    DEBUG_EDGE_ZONES = False
+    start = time.time()
+    frame_count = total_cards = total_battles = 0
     
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
 
-        # Detect board in current frame (with smoothing)
-        current_board = board_detector._detect_inner_from_brightness(frame)
-        if current_board is not None:
-            current_board = board_detector.smooth_detection(current_board)
-        else:
-            current_board = board_corners
+        curr_board = board_detector._detect_inner_from_brightness(frame)
+        curr_board = board_detector.smooth_detection(curr_board) if curr_board is not None else board
         
-        # Detect cards
-        cards, battles = card_detector.detect_cards(frame, current_board)
+        cards, battles = detector.detect_cards(frame, curr_board)
+        scores = detector.get_team_scores(cards, battles)
+        events = tracker.update(cards, battles, detector)
         
-        # Get team scores
-        scores = card_detector.get_team_scores(cards, battles)
-        
-        # Update event tracker
-        events = event_tracker.update(cards, battles, card_detector)
-        
-        # Update statistics (exclude ghosts)
         real_cards = [c for c in cards if not c.is_ghost]
-        cards_detected_total += len(real_cards)
-        battles_detected_total += len(battles)
+        total_cards += len(real_cards)
+        total_battles += len(battles)
         
-        # Draw scoreboard
         draw_scoreboard(frame, scores, width)
         
-        # Draw board boundary
-        if current_board is not None:
-            board_int = current_board.astype(np.int32)
-            cv2.polylines(frame, [board_int], True, (255, 255, 0), 2)
-            
-            cv2.putText(frame, "Board", 
-                       (board_int[0][0] + 10, board_int[0][1] + 30),
+        if curr_board is not None:
+            cv2.polylines(frame, [curr_board.astype(np.int32)], True, (255, 255, 0), 2)
+            cv2.putText(frame, "Board", (int(curr_board[0][0]+10), int(curr_board[0][1]+30)),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-        
-        # Debug: Draw edge buffer zones
-        if DEBUG_EDGE_ZONES:
-            draw_edge_buffer_zone(frame, card_detector)
 
-        # Draw battle pairs with status
+        # Draw battles
         for battle in battles:
-            tracked_obj = card_detector.tracked_objects.get(battle.card_id)
+            tracked = detector.tracked_objects.get(battle.card_id)
+            confirmed = tracked and tracked.is_confirmed_battle
+            color = (0, 0, 255) if confirmed else (0, 165, 255)
+            cv2.drawContours(frame, [battle.box], 0, color, 3 if confirmed else 2)
             
-            # Different color for unconfirmed battles
-            if tracked_obj and not tracked_obj.is_confirmed_battle:
-                battle_color = (0, 165, 255)  # Orange for unconfirmed
-                cv2.drawContours(frame, [battle.box], 0, battle_color, 2)
-            else:
-                battle_color = (0, 0, 255)  # Red for confirmed
-                cv2.drawContours(frame, [battle.box], 0, battle_color, 3)
-            
-            top_point = get_top_point(battle.box)
-            
+            top = get_top_point(battle.box)
             if battle.battle_ids:
-                team1 = card_detector.tracked_objects.get(battle.battle_ids[0])
-                team2 = card_detector.tracked_objects.get(battle.battle_ids[1])
-                team1_name = team1.team if team1 else "?"
-                team2_name = team2.team if team2 else "?"
-                
-                if tracked_obj and not tracked_obj.is_confirmed_battle:
-                    conf_count = tracked_obj.battle_confirmation_count
-                    conf_needed = card_detector.params.battle_confirmation_frames
-                    text = f"Battle? {battle.battle_ids[0]}({team1_name}) vs {battle.battle_ids[1]}({team2_name}) [{conf_count}/{conf_needed}]"
+                t1 = detector.tracked_objects.get(battle.battle_ids[0])
+                t2 = detector.tracked_objects.get(battle.battle_ids[1])
+                team1 = t1.team if t1 else "?"
+                team2 = t2.team if t2 else "?"
+                if not confirmed:
+                    cnt = tracked.battle_confirmation_count
+                    text = f"Battle? {battle.battle_ids[0]}({team1}) vs {battle.battle_ids[1]}({team2}) [{cnt}/{detector.params.battle_confirmation_frames}]"
                 else:
-                    text = f"Battle {battle.battle_ids[0]}({team1_name}) vs {battle.battle_ids[1]}({team2_name})"
+                    text = f"Battle {battle.battle_ids[0]}({team1}) vs {battle.battle_ids[1]}({team2})"
             else:
-                text = f"Battle"
+                text = "Battle"
             
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 0.7
-            thickness = 2
-            (text_width, text_height), _ = cv2.getTextSize(text, font, font_scale, thickness)
-            
-            text_x = top_point[0] - text_width // 2
-            text_y = top_point[1] - 10
-            
-            cv2.rectangle(frame,
-                         (text_x - 5, text_y - text_height - 5),
-                         (text_x + text_width + 5, text_y + 5),
-                         (0, 0, 0), -1)
-            
-            cv2.putText(frame, text, (text_x, text_y), 
-                       font, font_scale, battle_color, thickness)
-            
-            # Draw battle status (only for confirmed)
-            if tracked_obj and tracked_obj.is_confirmed_battle:
-                draw_battle_status(frame, battle, tracked_obj)
+            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+            draw_text_with_bg(frame, text, (top[0]-tw//2, top[1]-10), color)
 
-        # Draw individual cards with team colors
+        # Draw cards
         for card in cards:
-            # Get team color
             color = TEAM_COLORS.get(card.team, (0, 255, 0))
-            
-            # Draw with transparency if ghost
             if card.is_ghost:
                 overlay = frame.copy()
                 cv2.drawContours(overlay, [card.box], 0, (128, 128, 128), 2)
                 cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
             else:
-                # Draw thicker border for edge zone cards
-                thickness = 2 if card.in_edge_zone else 3
-                cv2.drawContours(frame, [card.box], 0, color, thickness)
+                cv2.drawContours(frame, [card.box], 0, color, 2 if card.in_edge_zone else 3)
             
-            top_point = get_top_point(card.box)
-            team_text = f" ({card.team})" if card.team else ""
-            label = f"Card {card.card_id}{team_text}"
+            top = get_top_point(card.box)
+            label = f"Card {card.card_id}"
+            if card.team:
+                label += f" ({card.team})"
             if card.is_ghost:
                 label += " [ghost]"
-            if card.in_edge_zone and not card.is_ghost:
+            elif card.in_edge_zone:
                 label += " [edge]"
             
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 0.6
-            thickness = 2
-            (text_width, text_height), _ = cv2.getTextSize(label, font, font_scale, thickness)
-            
-            text_x = top_point[0] - text_width // 2
-            text_y = top_point[1] - 10
-            
-            bg_alpha = 0.5 if card.is_ghost else 1.0
-            overlay = frame.copy()
-            cv2.rectangle(overlay,
-                         (text_x - 3, text_y - text_height - 3),
-                         (text_x + text_width + 3, text_y + 3),
-                         (0, 0, 0), -1)
-            cv2.addWeighted(overlay, bg_alpha, frame, 1 - bg_alpha, 0, frame)
-            
-            label_color = (128, 128, 128) if card.is_ghost else color
-            cv2.putText(frame, label, (text_x, text_y), 
-                       font, font_scale, label_color, thickness)
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            lcolor = (128, 128, 128) if card.is_ghost else color
+            draw_text_with_bg(frame, label, (top[0]-tw//2, top[1]-10), lcolor,
+                            font_scale=0.6, bg_alpha=0.5 if card.is_ghost else 1.0)
 
-        # Draw events
-        draw_events(frame, events, height)
-
-        # Add frame statistics
-        stats_text = f"Frame: {frame_count}/{total_frames} | Cards: {len(real_cards)} | Battles: {len(battles)}"
-        cv2.putText(frame, stats_text, (10, height - 20),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        draw_events(frame, events)
+        
+        stats = f"Frame: {frame_count}/{total} | Cards: {len(real_cards)} | Battles: {len(battles)}"
+        cv2.putText(frame, stats, (10, height-20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
         if SAVE_VIDEO:
-            writer.write(frame)
+            out.write(frame)
 
         frame_count += 1
         if frame_count % 30 == 0:
-            elapsed = time.time() - start_time
-            avg_cards = cards_detected_total / frame_count
-            avg_battles = battles_detected_total / frame_count
-            print(f"Frame {frame_count}/{total_frames} | "
-                  f"Speed: {frame_count/elapsed:.2f} fps | "
-                  f"Avg Cards: {avg_cards:.1f} | Avg Battles: {avg_battles:.1f} | "
+            elapsed = time.time() - start
+            print(f"Frame {frame_count}/{total} | Speed: {frame_count/elapsed:.2f} fps | "
+                  f"Avg Cards: {total_cards/frame_count:.1f} | Battles: {total_battles/frame_count:.1f} | "
                   f"Score A:{scores['A']} B:{scores['B']}")
 
     cap.release()
     if SAVE_VIDEO:
-        writer.release()
+        out.release()
     
-    elapsed_total = time.time() - start_time
+    elapsed = time.time() - start
     print(f"\n{'='*70}")
-    print(f"PROCESSING SUMMARY")
+    print(f"SUMMARY")
     print(f"{'='*70}")
-    print(f"Total frames processed: {frame_count}")
-    print(f"Processing time: {elapsed_total:.2f}s ({frame_count/elapsed_total:.2f} fps)")
-    print(f"Average cards per frame: {cards_detected_total/frame_count:.2f}")
-    print(f"Average battles per frame: {battles_detected_total/frame_count:.2f}")
+    print(f"Frames: {frame_count} | Time: {elapsed:.2f}s ({frame_count/elapsed:.2f} fps)")
+    print(f"Avg Cards: {total_cards/frame_count:.2f} | Avg Battles: {total_battles/frame_count:.2f}")
     print(f"Final Score - Team A: {scores['A']}, Team B: {scores['B']}")
-    print(f"Output saved to: {output_dir / f'detected_{video_path.stem}.mp4'}")
+    print(f"Output: {output_dir / f'detected_{video_path.stem}.mp4'}")
     print(f"{'='*70}")
 
 if __name__ == "__main__":
