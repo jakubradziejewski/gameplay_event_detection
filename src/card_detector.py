@@ -302,7 +302,7 @@ class CardDetector:
         """Update all existing trackers"""
         to_remove = []
         
-        for obj_id, tracked_obj in self.tracked_objects.items():
+        for obj_id, tracked_obj in list(self.tracked_objects.items()):
             max_lost = self.battle_noise_threshold if tracked_obj.is_battle else self.max_frames_lost
             
             success, bbox = tracked_obj.tracker.update(frame)
@@ -319,7 +319,8 @@ class CardDetector:
                     to_remove.append(obj_id)
         
         for obj_id in to_remove:
-            del self.tracked_objects[obj_id]
+            if obj_id in self.tracked_objects:
+                del self.tracked_objects[obj_id]
             if obj_id in self.previous_card_positions:
                 del self.previous_card_positions[obj_id]
     
@@ -507,7 +508,10 @@ class CardDetector:
                     detection.team = team
                     result_objects.append(detection)
         
-        for obj_id, tracked_obj in self.tracked_objects.items():
+        # Track objects to remove (to avoid modifying dict during iteration)
+        objects_to_remove = []
+        
+        for obj_id, tracked_obj in list(self.tracked_objects.items()):
             if obj_id not in matched_ids and tracked_obj.frames_lost == 0:
                 if board_corners is None or self._is_bbox_fully_inside_board(tracked_obj.bbox, board_corners):
                     box = self._bbox_to_box(tracked_obj.bbox)
@@ -526,9 +530,14 @@ class CardDetector:
                     result_objects.append(card)
                 else:
                     if not tracked_obj.is_battle:
-                        del self.tracked_objects[obj_id]
-                        if obj_id in self.previous_card_positions:
-                            del self.previous_card_positions[obj_id]
+                        objects_to_remove.append(obj_id)
+        
+        # Remove objects that left the board
+        for obj_id in objects_to_remove:
+            if obj_id in self.tracked_objects:
+                del self.tracked_objects[obj_id]
+            if obj_id in self.previous_card_positions:
+                del self.previous_card_positions[obj_id]
         
         return result_objects
     
@@ -577,7 +586,7 @@ class CardDetector:
         """Identify which cards entered battle based on recent positions near battle location"""
         nearby_cards = []
         
-        for obj_id, tracked_obj in self.tracked_objects.items():
+        for obj_id, tracked_obj in list(self.tracked_objects.items()):
             if tracked_obj.is_battle:
                 continue
             
