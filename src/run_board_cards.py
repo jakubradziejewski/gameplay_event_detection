@@ -8,7 +8,7 @@ from card_detector import CardDetector, DetectionParams
 from board_detector import BoardDetector
 
 # CONFIGURATION
-VIDEO_PATH = "data/hard/hard.mp4"
+VIDEO_PATH = "data/easy/easy2.mp4"
 OUTPUT_DIR = "output_video"
 SAVE_VIDEO = True
 

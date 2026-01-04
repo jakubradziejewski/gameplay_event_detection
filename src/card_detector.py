@@ -78,6 +78,9 @@ class CardDetector:
         # Overlap detection
         self.max_new_card_overlap = 0.1  # 10% max overlap for new cards
         
+        # Ghost display duration
+        self.max_ghost_frames = 20  # Increased from 10 to 20 frames
+        
     def _create_tracker(self):
         """Create a new OpenCV tracker"""
         if self.tracker_type == 'CSRT':
@@ -202,8 +205,8 @@ class CardDetector:
             if tracked.is_battle:
                 continue
             
-            # Only show ghosts for cards temporarily occluded
-            if tracked.frames_lost > 0 and tracked.frames_lost <= 10:
+            # Only show ghosts for cards temporarily occluded (up to max_ghost_frames)
+            if tracked.frames_lost > 0 and tracked.frames_lost <= self.max_ghost_frames:
                 if tracked.last_valid_bbox and tracked.last_valid_box is not None:
                     x, y, w, h = tracked.last_valid_bbox
                     ghost_card = Card(
@@ -319,21 +322,42 @@ class CardDetector:
             
             # Only process battle endings for CONFIRMED battles
             if tracked_battle.is_confirmed_battle:
-                # Battle ending logic - only if one card is FULLY REMOVED from tracking
-                if not card1_exists and card2_exists:
-                    # Card 1 lost the battle
-                    battles_to_end.append((battle.card_id, card2_id, card1_id))
+                # Battle ending logic - check if card is removed OR moved away from battle
+                
+                # Check if cards are still in battle position
+                card1_in_battle_pos = False
+                card2_in_battle_pos = False
+                
+                if card1_exists:
+                    card1_tracked = self.tracked_objects[card1_id]
+                    # Check distance from battle center
+                    if card1_tracked.last_center:
+                        dist = np.sqrt((card1_tracked.last_center[0] - tracked_battle.last_center[0])**2 +
+                                     (card1_tracked.last_center[1] - tracked_battle.last_center[1])**2)
+                        card1_in_battle_pos = dist < 100  # Within 100px of battle center
+                
+                if card2_exists:
+                    card2_tracked = self.tracked_objects[card2_id]
+                    if card2_tracked.last_center:
+                        dist = np.sqrt((card2_tracked.last_center[0] - tracked_battle.last_center[0])**2 +
+                                     (card2_tracked.last_center[1] - tracked_battle.last_center[1])**2)
+                        card2_in_battle_pos = dist < 100
+                
+                # Battle ends if: card removed OR card moved away from battle
+                if not card1_exists or not card1_in_battle_pos:
+                    if not card2_exists or not card2_in_battle_pos:
+                        # Both removed or moved - battle cancelled
+                        battles_to_remove.append(battle.card_id)
+                    else:
+                        # Card 1 lost (removed or fled)
+                        battles_to_end.append((battle.card_id, card2_id, card1_id))
                     
-                elif not card2_exists and card1_exists:
-                    # Card 2 lost the battle
+                elif not card2_exists or not card2_in_battle_pos:
+                    # Card 2 lost (removed or fled)
                     battles_to_end.append((battle.card_id, card1_id, card2_id))
                     
-                elif not card1_exists and not card2_exists:
-                    # Both cards removed - end battle without winner
-                    battles_to_remove.append(battle.card_id)
-                    
                 else:
-                    # Both cards still exist - battle continues
+                    # Both cards still exist in battle - battle continues
                     # Reset missing counters if both present
                     if card1_present and card2_present:
                         tracked_battle.frames_both_missing = 0
