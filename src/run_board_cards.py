@@ -7,15 +7,14 @@ from card_detector import CardDetector
 from board_detector import BoardDetector
 
 # Configuration
-VIDEO_PATH = "data/hard/hard.mp4"
+VIDEO_PATH = "data/hard/hard2.mp4"
 OUTPUT_DIR = "output_video"
 TEAM_COLORS = {'A': (255, 0, 0), 'B': (0, 255, 0)}
 
 class GameEventTracker:
     def __init__(self):
         self.previous_cards = {}
-        self.previous_battles = {}
-        self.battle_participants = {}  # Maps battle_id -> {c1, c2, team1, team2}
+        self.previous_battles = set()  # Just track battle IDs
         self.events = deque(maxlen=5)
         
     def update(self, cards, battles, detector):
@@ -23,66 +22,38 @@ class GameEventTracker:
         current_battles = set()
         new_events = []
         
-        # Track confirmed battles
+        # Track current battles
         for battle in battles:
-            if battle.battle_ids:
-                tracked = detector.tracked_objects.get(battle.card_id)
-                if tracked and tracked.is_confirmed_battle:
-                    current_battles.add(battle.card_id)
-                    
-                    # New battle started
-                    if battle.card_id not in self.previous_battles:
-                        c1, c2 = battle.battle_ids
-                        t1 = detector.tracked_objects.get(c1)
-                        t2 = detector.tracked_objects.get(c2)
-                        team1 = t1.team if t1 else '?'
-                        team2 = t2.team if t2 else '?'
-                        
-                        new_events.append(f"Battle: Card {c1} (Team {team1}) vs Card {c2} (Team {team2})")
-                        
-                        self.previous_battles[battle.card_id] = battle.battle_ids
-                        self.battle_participants[battle.card_id] = {
-                            'c1': c1, 'c2': c2, 
-                            'team1': team1, 'team2': team2
-                        }
+            current_battles.add(battle.battle_id)
+            
+            # New battle started
+            if battle.battle_id not in self.previous_battles:
+                new_events.append(
+                    f"Battle: Card {battle.card1_id} (Team {battle.team1}) vs "
+                    f"Card {battle.card2_id} (Team {battle.team2})"
+                )
         
-        # Check ended battles
-        ended_battles = set(self.previous_battles.keys()) - current_battles
-        for bid in ended_battles:
-            c1, c2 = self.previous_battles[bid]
-            info = self.battle_participants.get(bid)
-            
-            # Check which cards still exist
-            real_survivors = [c for c in cards if c.card_id in [c1, c2] and not c.is_ghost]
-            
-            if len(real_survivors) == 1:
-                winner = real_survivors[0]
-                new_events.append(f"Battle won by Card {winner.card_id} (Team {winner.team})")
-            elif len(real_survivors) == 2:
-                # Both cards still exist, battle somehow ended without resolution
-                pass
-            # If no survivors, we also don't report anything (rare edge case)
-            
-            del self.previous_battles[bid]
-            if bid in self.battle_participants:
-                del self.battle_participants[bid]
+        # Check for battle loss events from detector
+        if hasattr(detector, 'battle_events') and detector.battle_events:
+            new_events.extend(detector.battle_events)
         
-        # Track card appearances and movements (excluding cards in active battles)
+        # Track active battle cards to exclude from movement tracking
         active_battle_cards = set()
-        for bid in current_battles:
-            if bid in self.previous_battles:
-                c1, c2 = self.previous_battles[bid]
-                active_battle_cards.add(c1)
-                active_battle_cards.add(c2)
+        for battle in battles:
+            active_battle_cards.add(battle.card1_id)
+            active_battle_cards.add(battle.card2_id)
         
+        # Track card appearances and movements (excluding cards in battles)
         for card in cards:
             if card.is_ghost:
                 continue
             
             current_cards.add(card.card_id)
+            
             # Skip cards that are currently in battles
             if card.card_id in active_battle_cards:
                 continue
+                
             if card.card_id not in self.previous_cards:
                 # New card appeared
                 new_events.append(f"Card {card.card_id} (Team {card.team}) appears")
@@ -99,6 +70,9 @@ class GameEventTracker:
         disappeared_cards = set(self.previous_cards.keys()) - current_cards
         for cid in disappeared_cards:
             del self.previous_cards[cid]
+        
+        # Update battle tracking
+        self.previous_battles = current_battles
         
         # Add new events to the queue
         for event in new_events:
@@ -171,7 +145,7 @@ def main():
 
     print(f"Parameters: Card area={detector.params.min_area}-{detector.params.max_area}, "
           f"Aspect={detector.params.min_aspect:.1f}-{detector.params.max_aspect:.1f}, "
-          f"Edge buffer X={detector.params.edge_buffer_x*100:.0f}% Y={detector.params.edge_buffer_y*100:.0f}%")
+          f"Battle proximity buffer={detector.params.battle_proximity_buffer*100:.0f}%")
     
     start = time.time()
     frame_count = 0
@@ -198,28 +172,18 @@ def main():
             cv2.putText(frame, "Board", (int(curr_board[0][0]+10), int(curr_board[0][1]+30)),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
+        # Draw battles
         for battle in battles:
-            tracked = detector.tracked_objects.get(battle.card_id)
-            confirmed = tracked and tracked.is_confirmed_battle
-            if not confirmed:
-                continue
-            
             color = (0, 0, 255)
             cv2.drawContours(frame, [battle.box], 0, color, 3)
             
             top = get_top_point(battle.box)
-            if battle.battle_ids:
-                t1 = detector.tracked_objects.get(battle.battle_ids[0])
-                t2 = detector.tracked_objects.get(battle.battle_ids[1])
-                team1 = t1.team if t1 else "?"
-                team2 = t2.team if t2 else "?"
-                text = f"Battle {battle.battle_ids[0]}({team1}) vs {battle.battle_ids[1]}({team2})"
-            else:
-                text = "Battle"
+            text = f"Battle: {battle.card1_id}({battle.team1}) vs {battle.card2_id}({battle.team2})"
             
             (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
             draw_text_with_bg(frame, text, (top[0]-tw//2, top[1]-10), color)
 
+        # Draw cards
         for card in real_cards:
             color = TEAM_COLORS.get(card.team, (0, 255, 0))
             cv2.drawContours(frame, [card.box], 0, color, 2 if card.in_edge_zone else 3)
@@ -245,7 +209,7 @@ def main():
         if frame_count % 50 == 0:
             elapsed = time.time() - start
             print(f"Frame {frame_count}/{total} | Speed: {frame_count/elapsed:.2f} fps | "
-                  f"Score A:{scores['A']} B:{scores['B']}")
+                  f"Score A:{scores['A']} B:{scores['B']} | Active battles: {len(battles)}")
     
     cap.release()
     out.release()
