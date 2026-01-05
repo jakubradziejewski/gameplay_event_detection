@@ -8,15 +8,10 @@ class DetectionParams:
     gradient_threshold: int = 30
     canny_low: int = 50
     canny_high: int = 150
-    min_area: int = 9000
+    min_area: int = 10000
     max_area: int = 16000
     min_aspect: float = 1.2
     max_aspect: float = 2.8
-    solidity_threshold: float = 0.85
-    edge_buffer_x: float = 0.10
-    edge_buffer_y: float = 0.18
-    edge_min_area: int = 10000
-    edge_solidity_threshold: float = 0.90
     battle_proximity_buffer: float = 0.10  # 10% buffer for battle detection
 
 @dataclass
@@ -27,8 +22,6 @@ class Card:
     height: float
     card_id: Optional[int] = None
     team: Optional[str] = None
-    is_ghost: bool = False
-    in_edge_zone: bool = False
 
 @dataclass
 class Battle:
@@ -40,6 +33,9 @@ class Battle:
     team1: str
     team2: str
     initial_center: Tuple[float, float] = None  # Track initial battle center
+    last_valid_bbox: Tuple[int, int, int, int] = None  # Keep last known battle zone
+    card1_in_zone: bool = True  # Track if card1 is still in battle zone
+    card2_in_zone: bool = True  # Track if card2 is still in battle zone
 
 @dataclass
 class TrackedObject:
@@ -70,47 +66,20 @@ class CardDetector:
     def _assign_team(self, center: Tuple[float, float]) -> str:
         return 'A' if center[0] < self.board_center_x else 'B' if self.board_center_x else None
     
-    def _calculate_edge_buffer(self, board_corners: np.ndarray):
-        if board_corners is None:
-            return None
-        x_min, y_min = np.min(board_corners, axis=0)
-        x_max, y_max = np.max(board_corners, axis=0)
-        width, height = x_max - x_min, y_max - y_min
-        buffer_x, buffer_y = width * self.params.edge_buffer_x, height * self.params.edge_buffer_y
-        return {
-            'x_min': x_min, 'y_min': y_min, 'x_max': x_max, 'y_max': y_max,
-            'inner_x_min': x_min + buffer_x, 'inner_y_min': y_min + buffer_y,
-            'inner_x_max': x_max - buffer_x, 'inner_y_max': y_max - buffer_y
-        }
-    
-    def _is_in_edge_zone(self, center: Tuple[float, float]) -> bool:
-        if not self.edge_buffer:
-            return False
-        x, y = center
-        eb = self.edge_buffer
-        in_board = eb['x_min'] <= x <= eb['x_max'] and eb['y_min'] <= y <= eb['y_max']
-        in_safe = eb['inner_x_min'] <= x <= eb['inner_x_max'] and eb['inner_y_min'] <= y <= eb['inner_y_max']
-        return in_board and not in_safe
-
     def detect_cards(self, frame, board_corners=None):
         self.current_frame += 1
         if board_corners is not None:
             if self.board_center_x is None:
                 self.board_center_x = np.mean(board_corners[:, 0])
-            if self.edge_buffer is None:
-                self.edge_buffer = self._calculate_edge_buffer(board_corners)
-        
         self._update_trackers(frame)
         detected_cards = self._detect_cards_only(frame)
         
         if board_corners is not None:
             detected_cards = self._filter_inside_board(detected_cards, board_corners)
-        
-        detected_cards = self._filter_edge_cards(detected_cards)
+
         detected_cards = self._merge_overlaps(detected_cards)
         
         all_cards = self._match_and_track(frame, detected_cards, board_corners)
-        all_cards = self._add_ghosts(all_cards)
         
         # Detect battles from card positions
         self._detect_battles_from_cards(all_cards)
@@ -119,6 +88,18 @@ class CardDetector:
         battle_results = self._process_battles(all_cards)
         
         return all_cards, battle_results
+    
+    def _has_enough_features(self, gray_frame, box):
+        # Crop to the card area
+        x, y, w, h = self._box_to_bbox(box)
+        roi = gray_frame[y:y+h, x:x+w]
+        if roi.size == 0: return False
+        
+        orb = cv2.ORB_create(nfeatures=100)
+        keypoints = orb.detect(roi, None)
+        
+        # A card should have dozens of keypoints; an empty cell will have very few
+        return len(keypoints) > 15
     
     def _detect_cards_only(self, frame):
         """Detect only individual cards, no battle shapes"""
@@ -165,28 +146,22 @@ class CardDetector:
             if h < w:
                 w, h = h, w
             asp = h / w
-            hull = cv2.convexHull(c)
-            sol = area / cv2.contourArea(hull) if cv2.contourArea(hull) > 0 else 0
             ctr = rect[0]
-            edge = self._is_in_edge_zone(ctr)
-            
-            if edge and (sol < self.params.edge_solidity_threshold or area < self.params.edge_min_area):
-                continue
-            if not edge and sol < self.params.solidity_threshold:
-                continue
             
             box = np.int32(cv2.boxPoints(rect))
             p = self.params
             # Only detect regular cards
             if p.min_area <= area <= p.max_area and p.min_aspect <= asp <= p.max_aspect:
-                cards.append(Card(box=box, center=ctr, width=w, height=h, in_edge_zone=edge))
+                
+                if self._has_enough_features(gray, box):
+                    cards.append(Card(box=box, center=ctr, width=w, height=h))
         
         return cards
     
     def _detect_battles_from_cards(self, cards: List[Card]):
         """Detect battles by checking if opposing team cards are close to each other"""
-        # Only consider non-ghost cards
-        active_cards = [c for c in cards if not c.is_ghost and c.team]
+        
+        active_cards = [c for c in cards if c.team]
         
         # Group cards by team
         team_a = [c for c in active_cards if c.team == 'A']
@@ -222,7 +197,10 @@ class CardDetector:
                             box=battle_box,
                             team1=card_a.team,
                             team2=card_b.team,
-                            initial_center=battle_center
+                            initial_center=battle_center,
+                            last_valid_bbox=battle_bbox,  # Initialize with current bbox
+                            card1_in_zone=True,
+                            card2_in_zone=True
                         )
                         self.battles[self.next_battle_id] = battle
                         self.next_battle_id += 1
@@ -272,7 +250,7 @@ class CardDetector:
         return (int(x_min), int(y_min), int(x_max - x_min), int(y_max - y_min))
     
     def _process_battles(self, cards: List[Card]) -> List[Battle]:
-        """Check if battles have ended (cards moved too far apart)"""
+        """Check if battles have ended and track which card left the battle zone first"""
         battles_to_remove = []
         battle_events = []
         
@@ -282,31 +260,49 @@ class CardDetector:
             card2 = next((c for c in cards if c.card_id == battle.card2_id), None)
             
             # Check if both cards still exist
-            card1_exists = card1 is not None and not card1.is_ghost
-            card2_exists = card2 is not None and not card2.is_ghost
-            
+            card1_exists = card1 is not None
+            card2_exists = card2 is not None
+
             if card1_exists and card2_exists:
+                # Store the current battle bbox as the last valid one
+                battle.last_valid_bbox = battle.bbox
+                
                 # Update battle bbox to follow cards as they move
                 battle.bbox = self._create_battle_bbox(card1, card2)
                 battle.box = self._bbox_to_box(battle.bbox)
                 
-                # Check if cards are still close enough to be in battle
-                if not self._are_cards_in_battle(card1, card2):
-                    # Cards moved too far apart - determine who lost
-                    # The card that moved further from initial battle center loses
+                # Check if each card is still in the ORIGINAL battle zone
+                card1_still_in = self._is_card_in_battle_zone(card1, battle)
+                card2_still_in = self._is_card_in_battle_zone(card2, battle)
+                
+                # Track who left the zone first
+                if battle.card1_in_zone and not card1_still_in:
+                    # Card 1 just left the battle zone - they lose
+                    battles_to_remove.append(battle_id)
+                    battle_events.append(f"Card {battle.card1_id} ({battle.team1}) lost the battle")
+                elif battle.card2_in_zone and not card2_still_in:
+                    # Card 2 just left the battle zone - they lose
+                    battles_to_remove.append(battle_id)
+                    battle_events.append(f"Card {battle.card2_id} ({battle.team2}) lost the battle")
+                elif not self._are_cards_in_battle(card1, card2):
+                    # Both cards moved too far apart (no longer touching with buffer)
+                    # Use distance from initial battle center as tiebreaker
                     dist1 = np.sqrt((card1.center[0] - battle.initial_center[0])**2 + 
                                   (card1.center[1] - battle.initial_center[1])**2)
                     dist2 = np.sqrt((card2.center[0] - battle.initial_center[0])**2 + 
                                   (card2.center[1] - battle.initial_center[1])**2)
                     
                     if dist1 > dist2:
-                        # Card 1 moved away and lost
                         battles_to_remove.append(battle_id)
                         battle_events.append(f"Card {battle.card1_id} ({battle.team1}) lost the battle")
                     else:
-                        # Card 2 moved away and lost
                         battles_to_remove.append(battle_id)
                         battle_events.append(f"Card {battle.card2_id} ({battle.team2}) lost the battle")
+                else:
+                    # Update zone tracking
+                    battle.card1_in_zone = card1_still_in
+                    battle.card2_in_zone = card2_still_in
+                    
             elif card1_exists and not card2_exists:
                 # Card 2 disappeared - Card 2 lost
                 battles_to_remove.append(battle_id)
@@ -330,23 +326,14 @@ class CardDetector:
         return list(self.battles.values())
     
     def _is_card_in_battle_zone(self, card: Card, battle: Battle) -> bool:
-        """Check if card center is within battle bounding box"""
-        bx, by, bw, bh = battle.bbox
+        """Check if card center is within the last valid battle bounding box"""
+        # Use last_valid_bbox if available, otherwise use current bbox
+        bbox_to_check = battle.last_valid_bbox if battle.last_valid_bbox else battle.bbox
+        bx, by, bw, bh = bbox_to_check
         cx, cy = card.center
         
         return bx <= cx <= bx + bw and by <= cy <= by + bh
-    
-    def _filter_edge_cards(self, detections):
-        filtered = []
-        for det in detections:
-            det.in_edge_zone = self._is_in_edge_zone(det.center)
-            if not det.in_edge_zone:
-                filtered.append(det)
-            else:
-                bbox = self._box_to_bbox(det.box)
-                if any(self._iou(bbox, o.bbox) > 0.3 for o in self.tracked_objects.values()):
-                    filtered.append(det)
-        return filtered
+
     
     def _merge_overlaps(self, dets):
         if not dets:
@@ -370,20 +357,10 @@ class CardDetector:
         xf, yf = min(x1 + w1, x2 + w2), min(y1 + h1, y2 + h2)
         return max(0, (xf - xi) * (yf - yi)) / (w1 * h1) if xf > xi and yf > yi and w1 * h1 > 0 else 0
     
-    def _add_ghosts(self, objs):
-        visible = {o.card_id for o in objs}
-        for oid, t in self.tracked_objects.items():
-            if oid not in visible and 0 < t.frames_lost <= 20:
-                if t.last_valid_bbox and t.last_valid_box is not None:
-                    x, y, w, h = t.last_valid_bbox
-                    objs.append(Card(box=t.last_valid_box.copy(), center=(x+w/2,y+h/2),
-                                   width=w, height=h, card_id=oid, team=t.team, is_ghost=True))
-        return objs
-    
     def get_team_scores(self, cards, battles):
         scores = {'A': 0, 'B': 0}
         for c in cards:
-            if c.team and not c.is_ghost:
+            if c.team:
                 scores[c.team] += 1
         return scores
     
@@ -403,7 +380,7 @@ class CardDetector:
                 t.last_valid_bbox, t.last_valid_box = t.bbox, self._bbox_to_box(t.bbox)
             else:
                 t.frames_lost += 1
-                if t.frames_lost > 30:
+                if t.frames_lost > 0:
                     to_remove.append(oid)
         for oid in to_remove:
             self.tracked_objects.pop(oid, None)
@@ -448,8 +425,6 @@ class CardDetector:
                 matched.add(best_id)
             else:
                 if any(self._overlap_ratio(bbox, o.bbox) > 0.1 for o in self.tracked_objects.values()):
-                    continue
-                if det.in_edge_zone:
                     continue
                 if board is None or all(cv2.pointPolygonTest(board.astype(np.int32), (float(c[0]), float(c[1])), False) >= 0 
                                        for c in det.box):
