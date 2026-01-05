@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Dict
+from pathlib import Path
 
 @dataclass
 class DetectionParams:
@@ -9,9 +10,9 @@ class DetectionParams:
     canny_low: int = 50
     canny_high: int = 150
     min_area: int = 10000
-    max_area: int = 16000
-    min_aspect: float = 1.2
-    max_aspect: float = 2.8
+    max_area: int = 15000
+    min_aspect: float = 1.3
+    max_aspect: float = 2.4
     battle_proximity_buffer: float = 0.10  # 10% buffer for battle detection
 
 @dataclass
@@ -59,6 +60,9 @@ class CardDetector:
         self.current_frame = 0
         self.board_center_x = None
         self.edge_buffer = None
+        self.viz_dir = Path("output_visualization")
+        self.viz_dir.mkdir(parents=True, exist_ok=True)
+        self.frame_number = 0
         
     def _create_tracker(self):
         return cv2.legacy.TrackerKCF_create()
@@ -101,43 +105,76 @@ class CardDetector:
         # A card should have dozens of keypoints; an empty cell will have very few
         return len(keypoints) > 15
     
+    
     def _detect_cards_only(self, frame):
-        """Detect only individual cards, no battle shapes"""
+        """Original watershed detection - proven to work for adjacent cards"""
+        self.frame_number += 1
+        save_viz = (self.frame_number % 500 == 0)
+        
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        
+        # Step 1: Morphological gradient
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         grad = cv2.morphologyEx(blur, cv2.MORPH_GRADIENT, kernel)
-        _, gbin = cv2.threshold(grad, self.params.gradient_threshold, 255, cv2.THRESH_BINARY)
-        edges = cv2.Canny(gbin, self.params.canny_low, self.params.canny_high)
-        kern2 = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-        dil = cv2.dilate(edges, kern2, iterations=2)
-        cnts, _ = cv2.findContours(dil, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
+        # Step 2: Threshold gradient
+        _, grad_bin = cv2.threshold(grad, self.params.gradient_threshold, 255, cv2.THRESH_BINARY)
+        
+        # Step 3: Canny edges
+        edges = cv2.Canny(grad_bin, self.params.canny_low, self.params.canny_high)
+        
+        # Step 4: Dilate edges
+        kernel2 = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        dilated = cv2.dilate(edges, kernel2, iterations=2)
+        
+        # Step 5: Create mask from contours
+        contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         mask = np.zeros_like(gray)
-        for c in cnts:
+        for c in contours:
             if cv2.contourArea(c) > 1000:
                 cv2.drawContours(mask, [c], -1, 255, -1)
         
+        # Step 6: Distance transform
         dist = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
         _, fg = cv2.threshold(dist, 0.4 * dist.max(), 255, 0)
         fg = np.uint8(fg)
-        bg = cv2.dilate(mask, kern2, iterations=3)
-        unk = cv2.subtract(bg, fg)
-        _, mrk = cv2.connectedComponents(fg)
-        mrk = mrk + 1
-        mrk[unk == 255] = 0
-        mrk = cv2.watershed(frame, mrk)
         
+        # Step 7: Background
+        bg = cv2.dilate(mask, kernel2, iterations=3)
+        
+        # Step 8: Unknown region
+        unknown = cv2.subtract(bg, fg)
+        
+        # Step 9: Markers
+        _, markers = cv2.connectedComponents(fg)
+        markers = markers + 1
+        markers[unknown == 255] = 0
+        
+        # Step 10: Watershed
+        markers_copy = markers.copy()
+        markers = cv2.watershed(frame, markers)
+        
+        # Save visualization if needed
+        if save_viz:
+            self._save_visualization(frame, gray, blur, grad, grad_bin, edges, 
+                                    dilated, mask, dist, fg, bg, unknown, 
+                                    markers_copy, markers)
+        
+        # Extract cards
         cards = []
-        for lbl in np.unique(mrk):
-            if lbl <= 1:
+        for label in np.unique(markers):
+            if label <= 1:
                 continue
-            tmask = np.zeros_like(gray)
-            tmask[mrk == lbl] = 255
-            cs, _ = cv2.findContours(tmask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            temp_mask = np.zeros_like(gray)
+            temp_mask[markers == label] = 255
+            
+            cs, _ = cv2.findContours(temp_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             if not cs:
                 continue
             c = cs[0]
+            
             area = cv2.contourArea(c)
             rect = cv2.minAreaRect(c)
             w, h = rect[1]
@@ -145,19 +182,100 @@ class CardDetector:
                 continue
             if h < w:
                 w, h = h, w
-            asp = h / w
-            ctr = rect[0]
+            aspect = h / w
             
             box = np.int32(cv2.boxPoints(rect))
+            
             p = self.params
-            # Only detect regular cards
-            if p.min_area <= area <= p.max_area and p.min_aspect <= asp <= p.max_aspect:
-                
+            if p.min_area <= area <= p.max_area and p.min_aspect <= aspect <= p.max_aspect:
                 if self._has_enough_features(gray, box):
-                    cards.append(Card(box=box, center=ctr, width=w, height=h))
+                    cards.append(Card(box=box, center=rect[0], width=w, height=h))
         
         return cards
-    
+
+    def _save_visualization(self, frame, gray, blur, grad, grad_bin, edges, 
+                        dilated, mask, dist, fg, bg, unknown, markers_pre, markers_post):
+        """Save step-by-step visualization with performance metrics"""
+        
+        # Normalize distance transform for display
+        dist_vis = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        
+        # Convert markers to color visualization
+        markers_color = np.zeros_like(frame)
+        num_cards_detected = 0
+        for label in np.unique(markers_post):
+            if label == -1:  # Watershed boundaries (RED - separation lines)
+                markers_color[markers_post == -1] = [0, 0, 255]
+            elif label > 1:
+                num_cards_detected += 1
+                # Random color for each region
+                color = np.random.randint(0, 255, 3).tolist()
+                markers_color[markers_post == label] = color
+        
+        # Create grid of images
+        row1 = np.hstack([
+            cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR),
+            cv2.cvtColor(blur, cv2.COLOR_GRAY2BGR),
+            cv2.cvtColor(grad, cv2.COLOR_GRAY2BGR)
+        ])
+        
+        row2 = np.hstack([
+            cv2.cvtColor(grad_bin, cv2.COLOR_GRAY2BGR),
+            cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR),
+            cv2.cvtColor(dilated, cv2.COLOR_GRAY2BGR)
+        ])
+        
+        row3 = np.hstack([
+            cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR),
+            cv2.applyColorMap(dist_vis, cv2.COLORMAP_JET),
+            cv2.cvtColor(fg, cv2.COLOR_GRAY2BGR)
+        ])
+        
+        row4 = np.hstack([
+            cv2.cvtColor(bg, cv2.COLOR_GRAY2BGR),
+            cv2.cvtColor(unknown, cv2.COLOR_GRAY2BGR),
+            markers_color
+        ])
+        
+        # Stack all rows
+        grid = np.vstack([row1, row2, row3, row4])
+        
+        # Add labels with better styling
+        labels = [
+            ["1. Grayscale", "2. Gaussian Blur", "3. Morph Gradient"],
+            ["4. Gradient Binary", "5. Canny Edges", "6. Dilated Edges"],
+            ["7. Contour Mask", "8. Distance Transform", "9. Foreground"],
+            ["10. Background", "11. Unknown Region", "12. Watershed (RED=boundaries)"]
+        ]
+        
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        h, w = gray.shape
+        for i, row_labels in enumerate(labels):
+            for j, label in enumerate(row_labels):
+                y = i * h + 30
+                x = j * w + 10
+                # Add black outline for better visibility
+                cv2.putText(grid, label, (x, y), font, 0.6, (0, 0, 0), 3)
+                cv2.putText(grid, label, (x, y), font, 0.6, (0, 255, 255), 2)
+        
+        # Add comprehensive summary
+        summary_height = 80
+        summary_panel = np.zeros((summary_height, grid.shape[1], 3), dtype=np.uint8)
+        
+        summary_line1 = f"Frame: {self.frame_number} | Regions detected: {num_cards_detected}"
+        summary_line2 = f"Pipeline: Full 12-step watershed (optimized for adjacent card separation)"
+        
+        cv2.putText(summary_panel, summary_line1, (20, 25), font, 0.7, (255, 255, 255), 2)
+        cv2.putText(summary_panel, summary_line2, (20, 55), font, 0.6, (200, 200, 200), 1)
+        
+        # Combine grid with summary
+        final_grid = np.vstack([grid, summary_panel])
+        
+        # Save
+        output_path = self.viz_dir / f"frame_{self.frame_number:06d}.jpg"
+        cv2.imwrite(str(output_path), final_grid)
+        print(f"Saved visualization: {output_path}")
+        
     def _detect_battles_from_cards(self, cards: List[Card]):
         """Detect battles by checking if opposing team cards are close to each other"""
         
