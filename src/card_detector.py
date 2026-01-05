@@ -13,11 +13,11 @@ class DetectionParams:
     min_aspect: float = 1.2
     max_aspect: float = 2.8
     solidity_threshold: float = 0.85
-    edge_buffer_x: float = 0.12
+    edge_buffer_x: float = 0.10
     edge_buffer_y: float = 0.18
     edge_min_area: int = 10000
     edge_solidity_threshold: float = 0.90
-    battle_proximity_buffer: float = 0.1  # 20% buffer for battle detection
+    battle_proximity_buffer: float = 0.10  # 10% buffer for battle detection
 
 @dataclass
 class Card:
@@ -39,6 +39,7 @@ class Battle:
     box: np.ndarray  # 4 corners for drawing
     team1: str
     team2: str
+    initial_center: Tuple[float, float] = None  # Track initial battle center
 
 @dataclass
 class TrackedObject:
@@ -201,12 +202,17 @@ class CardDetector:
                     for battle in self.battles.values():
                         if {battle.card1_id, battle.card2_id} == {card_a.card_id, card_b.card_id}:
                             battle_exists = True
+                            # Update battle bbox to track card movement
+                            battle.bbox = self._create_battle_bbox(card_a, card_b)
+                            battle.box = self._bbox_to_box(battle.bbox)
                             break
                     
                     if not battle_exists:
                         # Create new battle
                         battle_bbox = self._create_battle_bbox(card_a, card_b)
                         battle_box = self._bbox_to_box(battle_bbox)
+                        battle_center = ((card_a.center[0] + card_b.center[0]) / 2, 
+                                       (card_a.center[1] + card_b.center[1]) / 2)
                         
                         battle = Battle(
                             battle_id=self.next_battle_id,
@@ -215,7 +221,8 @@ class CardDetector:
                             bbox=battle_bbox,
                             box=battle_box,
                             team1=card_a.team,
-                            team2=card_b.team
+                            team2=card_b.team,
+                            initial_center=battle_center
                         )
                         self.battles[self.next_battle_id] = battle
                         self.next_battle_id += 1
@@ -265,7 +272,7 @@ class CardDetector:
         return (int(x_min), int(y_min), int(x_max - x_min), int(y_max - y_min))
     
     def _process_battles(self, cards: List[Card]) -> List[Battle]:
-        """Check if battles have ended (one card left the battle zone)"""
+        """Check if battles have ended (cards moved too far apart)"""
         battles_to_remove = []
         battle_events = []
         
@@ -274,25 +281,42 @@ class CardDetector:
             card1 = next((c for c in cards if c.card_id == battle.card1_id), None)
             card2 = next((c for c in cards if c.card_id == battle.card2_id), None)
             
-            # Check if both cards still exist and are in the battle zone
-            card1_in_zone = card1 is not None and not card1.is_ghost and self._is_card_in_battle_zone(card1, battle)
-            card2_in_zone = card2 is not None and not card2.is_ghost and self._is_card_in_battle_zone(card2, battle)
+            # Check if both cards still exist
+            card1_exists = card1 is not None and not card1.is_ghost
+            card2_exists = card2 is not None and not card2.is_ghost
             
-            # Battle ends if one card is not in zone
-            if not card1_in_zone and card2_in_zone:
-                # Card 1 lost
+            if card1_exists and card2_exists:
+                # Update battle bbox to follow cards as they move
+                battle.bbox = self._create_battle_bbox(card1, card2)
+                battle.box = self._bbox_to_box(battle.bbox)
+                
+                # Check if cards are still close enough to be in battle
+                if not self._are_cards_in_battle(card1, card2):
+                    # Cards moved too far apart - determine who lost
+                    # The card that moved further from initial battle center loses
+                    dist1 = np.sqrt((card1.center[0] - battle.initial_center[0])**2 + 
+                                  (card1.center[1] - battle.initial_center[1])**2)
+                    dist2 = np.sqrt((card2.center[0] - battle.initial_center[0])**2 + 
+                                  (card2.center[1] - battle.initial_center[1])**2)
+                    
+                    if dist1 > dist2:
+                        # Card 1 moved away and lost
+                        battles_to_remove.append(battle_id)
+                        battle_events.append(f"Card {battle.card1_id} ({battle.team1}) lost the battle")
+                    else:
+                        # Card 2 moved away and lost
+                        battles_to_remove.append(battle_id)
+                        battle_events.append(f"Card {battle.card2_id} ({battle.team2}) lost the battle")
+            elif card1_exists and not card2_exists:
+                # Card 2 disappeared - Card 2 lost
                 battles_to_remove.append(battle_id)
-                battle.loser_id = battle.card1_id
-                battle.loser_team = battle.team1
-                battle_events.append(f"Card {battle.card1_id} ({battle.team1}) lost the battle")
-            elif card1_in_zone and not card2_in_zone:
-                # Card 2 lost
-                battles_to_remove.append(battle_id)
-                battle.loser_id = battle.card2_id
-                battle.loser_team = battle.team2
                 battle_events.append(f"Card {battle.card2_id} ({battle.team2}) lost the battle")
-            elif not card1_in_zone and not card2_in_zone:
-                # Both cards left (rare case) - just end battle
+            elif card2_exists and not card1_exists:
+                # Card 1 disappeared - Card 1 lost
+                battles_to_remove.append(battle_id)
+                battle_events.append(f"Card {battle.card1_id} ({battle.team1}) lost the battle")
+            else:
+                # Both cards disappeared - just end battle
                 battles_to_remove.append(battle_id)
         
         # Remove ended battles

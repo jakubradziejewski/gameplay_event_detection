@@ -7,7 +7,7 @@ from card_detector import CardDetector
 from board_detector import BoardDetector
 
 # Configuration
-VIDEO_PATH = "data/hard/hard2.mp4"
+VIDEO_PATH = "data/medium/medium3.mp4"
 OUTPUT_DIR = "output_video"
 TEAM_COLORS = {'A': (255, 0, 0), 'B': (0, 255, 0)}
 
@@ -15,6 +15,7 @@ class GameEventTracker:
     def __init__(self):
         self.previous_cards = {}
         self.previous_battles = set()  # Just track battle IDs
+        self.cards_that_lost_battle = set()  # Track cards that just lost a battle
         self.events = deque(maxlen=5)
         
     def update(self, cards, battles, detector):
@@ -36,6 +37,17 @@ class GameEventTracker:
         # Check for battle loss events from detector
         if hasattr(detector, 'battle_events') and detector.battle_events:
             new_events.extend(detector.battle_events)
+            # Extract card IDs that lost battles
+            for event in detector.battle_events:
+                if "lost the battle" in event:
+                    # Extract card ID from "Card X (Team Y) lost the battle"
+                    parts = event.split()
+                    if len(parts) > 1:
+                        try:
+                            card_id = int(parts[1])
+                            self.cards_that_lost_battle.add(card_id)
+                        except ValueError:
+                            pass
         
         # Track active battle cards to exclude from movement tracking
         active_battle_cards = set()
@@ -50,8 +62,8 @@ class GameEventTracker:
             
             current_cards.add(card.card_id)
             
-            # Skip cards that are currently in battles
-            if card.card_id in active_battle_cards:
+            # Skip cards that are currently in battles OR just lost a battle
+            if card.card_id in active_battle_cards or card.card_id in self.cards_that_lost_battle:
                 continue
                 
             if card.card_id not in self.previous_cards:
@@ -65,6 +77,9 @@ class GameEventTracker:
                     new_events.append(f"Card {card.card_id} (Team {card.team}) moves")
             
             self.previous_cards[card.card_id] = card.center
+        
+        # Clear the cards_that_lost_battle set (only skip movement for one frame)
+        self.cards_that_lost_battle.clear()
         
         # Clean up tracking for cards that are no longer visible
         disappeared_cards = set(self.previous_cards.keys()) - current_cards
@@ -145,7 +160,7 @@ def main():
 
     print(f"Parameters: Card area={detector.params.min_area}-{detector.params.max_area}, "
           f"Aspect={detector.params.min_aspect:.1f}-{detector.params.max_aspect:.1f}, "
-          f"Battle proximity buffer={detector.params.battle_proximity_buffer*100:.0f}%")
+          f"Battle buffer={detector.params.battle_proximity_buffer*100:.0f}%")
     
     start = time.time()
     frame_count = 0
