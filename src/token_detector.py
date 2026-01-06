@@ -31,20 +31,20 @@ class TrackedToken:
 class TokenDetector:
     def __init__(self, enable_visualization=False, viz_output_dir="output_visualization_tokens"):
         # HSV range for red color (red wraps around in HSV)
-        self.lower_red1 = np.array([0, 100, 100])
-        self.upper_red1 = np.array([10, 255, 255])
-        self.lower_red2 = np.array([160, 100, 100])
+        self.lower_red1 = np.array([0, 60, 60])
+        self.upper_red1 = np.array([15, 255, 255])
+        self.lower_red2 = np.array([155, 60, 60])
         self.upper_red2 = np.array([180, 255, 255])
         
         # Size parameters (relative to board size)
-        self.min_radius_ratio = 0.011
+        self.min_radius_ratio = 0.010
         self.max_radius_ratio = 0.015
         
         # Hough Circle parameters
         self.hough_dp = 1
         self.hough_min_dist_ratio = 0.02
         self.hough_param1 = 50
-        self.hough_param2 = 9
+        self.hough_param2 = 10
         self.hough_edge_blur = 3
         
         # Battle token tracking
@@ -80,19 +80,23 @@ class TokenDetector:
         width = np.linalg.norm(right_center - left_center)
         return width
     
-    def _get_battle_search_region(self, battle_bbox: Tuple[int, int, int, int]) -> Tuple[int, int, int, int]:
+    def _get_battle_search_region(self, battle_bbox: Tuple[int, int, int, int], frame_height: int) -> Tuple[int, int, int, int]:
         bx, by, bw, bh = battle_bbox
 
-        # Define search region only above the battle, excluding the battle box itself
-        search_height = int(bh * 0.75)  # Height of region above battle
-        search_y = max(0, by - search_height)        
-        actual_height = by - search_y
+        # Define search region above and below the battle, excluding the battle box itself
+        search_height = int(bh * 0.75)  # Height of region above AND below battle
+        search_y = max(0, by - search_height)
+        search_bottom = min(frame_height, by + bh + search_height)
         
-        return (bx, search_y, bw, actual_height)
+        # Total height is from top of upper region to bottom of lower region, minus battle box
+        total_height = search_bottom - search_y
+        
+        return (bx, search_y, bw, total_height)
     
     def _create_region_mask(self, frame_shape: Tuple[int, int], 
-                           region: Tuple[int, int, int, int]) -> np.ndarray:
-        """Create a mask for the search region"""
+                       region: Tuple[int, int, int, int],
+                       battle_bbox: Optional[Tuple[int, int, int, int]] = None) -> np.ndarray:
+        """Create a mask for the search region, excluding the battle box interior"""
         mask = np.zeros(frame_shape, dtype=np.uint8)
         x, y, w, h = region
         
@@ -104,9 +108,19 @@ class TokenDetector:
         
         if w > 0 and h > 0:
             mask[y:y+h, x:x+w] = 255
+            
+            # Exclude the battle box interior if provided
+            if battle_bbox is not None:
+                bx, by, bw, bh = battle_bbox
+                bx = max(0, min(bx, frame_shape[1]))
+                by = max(0, min(by, frame_shape[0]))
+                bw = min(bw, frame_shape[1] - bx)
+                bh = min(bh, frame_shape[0] - by)
+                if bw > 0 and bh > 0:
+                    mask[by:by+bh, bx:bx+bw] = 0
         
         return mask
-    
+        
     def _update_token_trackers(self, frame: np.ndarray):
         """Update all token trackers and remove lost tokens"""
         to_remove = []
@@ -248,13 +262,12 @@ class TokenDetector:
             bx, by, bw, bh = battle.bbox
             
             # Get search region
-            search_region = self._get_battle_search_region((bx, by, bw, bh))
+            search_region = self._get_battle_search_region((bx, by, bw, bh), frame.shape[0])
             sx, sy, sw, sh = search_region
             all_search_regions.append((search_region, battle_id))
-            
-            # Create region mask
-            region_mask = self._create_region_mask(frame.shape[:2], search_region)
-            
+
+            # Create region mask (excluding battle box interior, but allowing overlap at edges)
+            region_mask = self._create_region_mask(frame.shape[:2], search_region, (bx, by, bw, bh))
             # Apply region mask to red mask
             red_mask_region = cv2.bitwise_and(red_mask, region_mask)
             
@@ -281,7 +294,8 @@ class TokenDetector:
                 for circle in circles[0, :]:
                     cx, cy, radius = circle
                     center = (float(cx), float(cy))
-                    
+                    if bx <= cx <= bx + bw and by <= cy <= by + bh:
+                        continue
                     # Determine team based on which side of battle center the token is
                     if cx < battle_center_x:
                         team = 'A'
