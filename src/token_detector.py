@@ -59,8 +59,8 @@ class TokenDetector:
         self.current_frame = 0
     
     def _create_tracker(self):
-        """Create a new KCF tracker for token tracking"""
-        return cv2.legacy.TrackerKCF_create()
+        """Create a new CSRT tracker for more accurate token tracking"""
+        return cv2.legacy.TrackerCSRT_create()
     
     def _calculate_board_size(self, board_corners: np.ndarray) -> float:
         """Calculate board width for size reference"""
