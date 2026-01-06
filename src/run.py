@@ -6,13 +6,14 @@ from collections import deque
 from card_detector import CardDetector
 from board_detector import BoardDetector
 from token_detector import TokenDetector
+from dice_detector import DiceDetector
 from visualization import (
-    draw_scoreboard, draw_board, draw_cards, draw_battles,
+    draw_dice, draw_scoreboard, draw_board, draw_cards, draw_battles,
     draw_events, draw_token_messages, draw_stats
 )
 
 # Configuration
-VIDEO_PATH = "data/hard/hard.mp4"
+VIDEO_PATH = "data/easy1.mp4"
 OUTPUT_DIR = "output_video_tokens"
 
 class GameEventTracker:
@@ -134,9 +135,13 @@ def main():
     detector = CardDetector(enable_visualization=True)
     tracker = GameEventTracker()
     token_detector = TokenDetector()
+    dice_detector = DiceDetector(history_length=20, distance_threshold=30, dice_radius=40)
 
     print(f"Token detection: radius ratio={token_detector.min_radius_ratio}-{token_detector.max_radius_ratio}, "
           f"Hough param2={token_detector.hough_param2}")
+    print(f"Dice detection: history_length={dice_detector.history_length}, "
+          f"distance_threshold={dice_detector.distance_threshold}, "
+          f"dice_radius={dice_detector.dice_radius}")
     
     start = time.time()
     frame_count = 0
@@ -163,7 +168,13 @@ def main():
         # Get token messages
         token_messages = token_detector.get_battle_messages(battles)
 
+        # Detect dice if board is available
+        dice_list = []
+        if curr_board is not None:
+            dice_list = dice_detector.detect_dice(frame, curr_board)
+
         # Draw everything using visualization functions
+        draw_dice(frame, dice_list)
         draw_scoreboard(frame, scores, width)
         draw_board(frame, curr_board)
         draw_battles(frame, battles, token_detector)
@@ -179,7 +190,8 @@ def main():
             elapsed = time.time() - start
             print(f"Frame {frame_count}/{total} | Speed: {frame_count/elapsed:.2f} fps | "
                   f"Score A:{scores['A']} B:{scores['B']} | "
-                  f"Tokens: {sum(len(t) for t in token_detector.battle_tokens.values())}")
+                  f"Tokens: {sum(len(t) for t in token_detector.battle_tokens.values())} | "
+                  f"Dice: {len(dice_list)}")
     
     cap.release()
     out.release()

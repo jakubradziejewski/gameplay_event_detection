@@ -10,6 +10,49 @@ BATTLE_COLOR = (0, 0, 255)
 BOARD_COLOR = (255, 255, 0)
 
 
+def draw_dice(frame, dice_list):
+    """
+    Draws markers on each die and a single info block.
+    Shows individual scores only, no totals or sums.
+    """
+    # 1. Draw individual markers on the dice in the image
+    for die in dice_list:
+        x, y, value = die['x'], die['y'], die['value']
+        
+        # Circle on the die
+        cv2.circle(frame, (x, y), 18, (0, 255, 0), 2)
+        
+        # Value label directly above each die
+        cv2.putText(
+            frame, 
+            str(value), 
+            (x - 10, y - 35),
+            cv2.FONT_HERSHEY_SIMPLEX, 
+            0.9, 
+            (0, 0, 255), 
+            2
+        )
+
+    # Starting Y position
+    start_y = 120 
+    
+    # Semi-transparent background for the text block
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (10, start_y), (350, start_y + 80), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
+
+    # Dice Count
+    cv2.putText(frame, f'Total Dice: {len(dice_list)}', (20, start_y + 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+    
+    # Individual Scores List
+    if dice_list:
+        scores = [str(die['value']) for die in dice_list]
+        score_str = f"Scores: {', '.join(scores)}"
+        cv2.putText(frame, score_str, (20, start_y + 65),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+
+
 def draw_text_with_bg(frame: np.ndarray, text: str, pos: Tuple[int, int], 
                      color: Tuple[int, int, int], font_scale: float = 0.7, 
                      thickness: int = 2, bg_alpha: float = 0.7):
