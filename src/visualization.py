@@ -53,6 +53,91 @@ def draw_dice(frame, dice_list):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 
 
+def draw_dice(frame, dice_list):
+    """
+    Draws markers on each die and a single info block.
+    Shows individual scores only, no totals or sums.
+    """
+    # 1. Draw individual markers on the dice in the image
+    for die in dice_list:
+        x, y, value = die['x'], die['y'], die['value']
+        
+        # Circle on the die
+        cv2.circle(frame, (x, y), 18, (0, 255, 0), 2)
+        
+        # Value label directly above each die
+        cv2.putText(
+            frame, 
+            str(value), 
+            (x - 10, y - 35),
+            cv2.FONT_HERSHEY_SIMPLEX, 
+            0.9, 
+            (0, 0, 255), 
+            2
+        )
+
+    # Starting Y position
+    start_y = 120 
+    
+    # Semi-transparent background for the text block
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (10, start_y), (350, start_y + 80), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
+
+    # Dice Count
+    cv2.putText(frame, f'Total Dice: {len(dice_list)}', (20, start_y + 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+    
+    # Individual Scores List
+    if dice_list:
+        scores = [str(die['value']) for die in dice_list]
+        score_str = f"Scores: {', '.join(scores)}"
+        cv2.putText(frame, score_str, (20, start_y + 65),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+
+
+def draw_dice(frame, dice_list):
+    """
+    Draws markers on each die and a single info block.
+    Shows individual scores only, no totals or sums.
+    """
+    # 1. Draw individual markers on the dice in the image
+    for die in dice_list:
+        x, y, value = die['x'], die['y'], die['value']
+        
+        # Circle on the die
+        cv2.circle(frame, (x, y), 18, (0, 255, 0), 2)
+        
+        # Value label directly above each die
+        cv2.putText(
+            frame, 
+            str(value), 
+            (x - 10, y - 35),
+            cv2.FONT_HERSHEY_SIMPLEX, 
+            0.9, 
+            (0, 0, 255), 
+            2
+        )
+
+    # Starting Y position
+    start_y = 120 
+    
+    # Semi-transparent background for the text block
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (10, start_y), (350, start_y + 80), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
+
+    # Dice Count
+    cv2.putText(frame, f'Total Dice: {len(dice_list)}', (20, start_y + 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+    
+    # Individual Scores List
+    if dice_list:
+        scores = [str(die['value']) for die in dice_list]
+        score_str = f"Scores: {', '.join(scores)}"
+        cv2.putText(frame, score_str, (20, start_y + 65),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        
 def draw_text_with_bg(frame: np.ndarray, text: str, pos: Tuple[int, int], 
                      color: Tuple[int, int, int], font_scale: float = 0.7, 
                      thickness: int = 2, bg_alpha: float = 0.7):
@@ -74,6 +159,9 @@ def get_top_point(box: np.ndarray) -> np.ndarray:
     """Get the topmost point of a bounding box"""
     return box[np.argmin(box[:, 1])]
 
+def get_bottom_point(box: np.ndarray) -> np.ndarray:
+    """Get the bottom-most point of a bounding box"""
+    return box[np.argmax(box[:, 1])]
 
 def draw_scoreboard(frame: np.ndarray, scores: Dict[str, int], width: int):
     """Draw the scoreboard at the top of the frame"""
@@ -171,12 +259,13 @@ def draw_battles(frame: np.ndarray, battles: List, token_detector=None):
             token_detector.draw_tokens(frame, battle.battle_id)
         
         # Draw battle label
-        top = get_top_point(battle.box)
+        bottom = get_bottom_point(battle.box)
         text = f"Battle: {battle.card1_id}({battle.team1}) vs {battle.card2_id}({battle.team2})"
         
         (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
-        draw_text_with_bg(frame, text, (top[0]-tw//2, top[1]-10), BATTLE_COLOR)
-
+        text_pos = (bottom[0] - tw // 2, bottom[1] + th + 10)
+        
+        draw_text_with_bg(frame, text, text_pos, BATTLE_COLOR)
 
 def draw_stats(frame: np.ndarray, frame_count: int, total_frames: int, 
                num_cards: int, num_battles: int, height: int):

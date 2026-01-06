@@ -13,7 +13,7 @@ from visualization import (
 )
 
 # Configuration
-VIDEO_PATH = "data/easy1.mp4"
+VIDEO_PATH = "data/hard/hard.mp4"
 OUTPUT_DIR = "output_video_tokens"
 
 class GameEventTracker:
@@ -137,8 +137,6 @@ def main():
     token_detector = TokenDetector()
     dice_detector = DiceDetector(history_length=20, distance_threshold=30, dice_radius=40)
 
-    print(f"Token detection: radius ratio={token_detector.min_radius_ratio}-{token_detector.max_radius_ratio}, "
-          f"Hough param2={token_detector.hough_param2}")
     print(f"Dice detection: history_length={dice_detector.history_length}, "
           f"distance_threshold={dice_detector.distance_threshold}, "
           f"dice_radius={dice_detector.dice_radius}")
@@ -190,7 +188,6 @@ def main():
             elapsed = time.time() - start
             print(f"Frame {frame_count}/{total} | Speed: {frame_count/elapsed:.2f} fps | "
                   f"Score A:{scores['A']} B:{scores['B']} | "
-                  f"Tokens: {sum(len(t) for t in token_detector.battle_tokens.values())} | "
                   f"Dice: {len(dice_list)}")
     
     cap.release()
