@@ -98,7 +98,7 @@ class DiceDetector:
         num_labels = cv2.connectedComponentsWithStats(inverted_region, connectivity=8)[0]
         
         # Subtract 1 to exclude background
-        return max(0, num_labels - 1)
+        return min(max(0, num_labels - 1), 6)
     
     def _detect_dice_centers(self, frame, board_corners):
         """
