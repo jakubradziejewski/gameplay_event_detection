@@ -67,8 +67,8 @@ class CardDetector:
         self.viz_frame_number = 0
 
     def _create_tracker(self):
-        """Create CSRT tracker for more accurate tracking"""
-        return cv2.legacy.TrackerCSRT_create()
+        #return cv2.legacy.TrackerCSRT_create()
+        return cv2.legacy.TrackerKCF_create()
 
     def _assign_team(self, center: Tuple[float, float]) -> str:
         return 'A' if center[0] < self.board_center_x else 'B' if self.board_center_x else None

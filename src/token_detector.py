@@ -47,7 +47,6 @@ class TokenDetector:
         
         # Battle token tracking
         self.battle_confirmed_tokens: Dict[int, List[Token]] = {}  # battle_id -> list of CONFIRMED tokens
-        self.battle_tokens = self.battle_confirmed_tokens  # Alias for backward compatibility
         self.battle_hit_cards: Dict[int, Dict[str, int]] = {}  # battle_id -> {card_id: token_count}
         
         # Token tracking with immediate tracking
@@ -59,8 +58,8 @@ class TokenDetector:
         self.current_frame = 0
     
     def _create_tracker(self):
-        """Create a new CSRT tracker for more accurate token tracking"""
-        return cv2.legacy.TrackerCSRT_create()
+        # return cv2.legacy.TrackerCSRT_create()
+        return cv2.legacy.TrackerKCF_create()
     
     def _calculate_board_size(self, board_corners: np.ndarray) -> float:
         """Calculate board width for size reference"""
@@ -73,32 +72,14 @@ class TokenDetector:
         return width
     
     def _get_battle_search_region(self, battle_bbox: Tuple[int, int, int, int]) -> Tuple[int, int, int, int]:
-        """Calculate the region above and at edges of battle where tokens should be detected
-        
-        Extends search to include tokens on the edge and slightly inside the battle boundary
-        
-        Returns: (x, y, w, h) of search region
-        """
         bx, by, bw, bh = battle_bbox
+
+        # Define search region only above the battle, excluding the battle box itself
+        search_height = int(bh * 0.75)  # Height of region above battle
+        search_y = max(0, by - search_height)        
+        actual_height = by - search_y
         
-        # Extended region: 
-        # - Extends 10% above the battle top edge (to catch tokens on top edge)
-        # - Extends 50% of battle height above that
-        # - Includes 10% inside the battle boundaries on sides and top
-        margin_above = int(bh * 0.05)  # Small margin above battle
-        search_height = int(bh * 0.5)  # Total search height (includes margin + extension above)
-        
-        # Extend search region slightly into the battle area (10% on each side and top)
-        edge_extension = int(bw * 0.05)
-        top_extension = int(bh * 0.05)
-        
-        # Start search region above the battle, but extend into it slightly
-        search_y = max(0, by - margin_above - search_height + top_extension)
-        search_x = max(0, bx - edge_extension)
-        search_w = bw + (2 * edge_extension)
-        search_h = search_height + top_extension  # Includes the top portion of battle
-        
-        return (search_x, search_y, search_w, search_h)
+        return (bx, search_y, bw, actual_height)
     
     def _create_region_mask(self, frame_shape: Tuple[int, int], 
                            region: Tuple[int, int, int, int]) -> np.ndarray:
@@ -178,8 +159,6 @@ class TokenDetector:
     
     def _match_detection_to_tracked_tokens(self, detection: Dict, battle_id: int) -> Optional[int]:
         """Try to match a detection to an existing tracked token
-        
-        Returns: token_id if matched, None otherwise
         """
         best_match_id = None
         best_distance = float('inf')
@@ -202,8 +181,6 @@ class TokenDetector:
     def detect_tokens_for_battles(self, frame: np.ndarray, battles: List, 
                                   board_corners: Optional[np.ndarray] = None) -> Dict[int, List[Dict]]:
         """Detect tokens in regions above active battles
-        
-        Returns: Dictionary mapping battle_id to list of detected token candidates
         """
         self.current_frame += 1
         
