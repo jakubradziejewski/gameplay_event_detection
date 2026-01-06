@@ -35,14 +35,14 @@ class TokenDetector:
         self.upper_red2 = np.array([180, 255, 255])
         
         # Size parameters (relative to board size)
-        self.min_radius_ratio = 0.008
+        self.min_radius_ratio = 0.011
         self.max_radius_ratio = 0.015
         
         # Hough Circle parameters
         self.hough_dp = 1
-        self.hough_min_dist_ratio = 0.01
+        self.hough_min_dist_ratio = 0.02
         self.hough_param1 = 50
-        self.hough_param2 = 8
+        self.hough_param2 = 9
         self.hough_edge_blur = 3
         
         # Battle token tracking
