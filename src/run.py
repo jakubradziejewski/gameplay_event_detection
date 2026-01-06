@@ -134,7 +134,7 @@ def main():
     # Initialize detector with visualization enabled
     detector = CardDetector(enable_visualization=True)
     tracker = GameEventTracker()
-    token_detector = TokenDetector()
+    token_detector = TokenDetector(enable_visualization=True, viz_output_dir="output_visualization_tokens")
     dice_detector = DiceDetector(history_length=20, distance_threshold=30, dice_radius=40)
 
     print(f"Dice detection: history_length={dice_detector.history_length}, "

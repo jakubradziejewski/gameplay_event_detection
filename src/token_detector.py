@@ -2,6 +2,8 @@ import cv2
 import numpy as np
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Dict
+from pathlib import Path
+from detection_steps_viz import save_token_detection_visualization
 
 @dataclass
 class Token:
@@ -27,7 +29,7 @@ class TrackedToken:
     is_confirmed: bool = False  # Whether this token is confirmed (stable for N frames)
 
 class TokenDetector:
-    def __init__(self):
+    def __init__(self, enable_visualization=False, viz_output_dir="output_visualization_tokens"):
         # HSV range for red color (red wraps around in HSV)
         self.lower_red1 = np.array([0, 100, 100])
         self.upper_red1 = np.array([10, 255, 255])
@@ -46,17 +48,24 @@ class TokenDetector:
         self.hough_edge_blur = 3
         
         # Battle token tracking
-        self.battle_confirmed_tokens: Dict[int, List[Token]] = {}  # battle_id -> list of CONFIRMED tokens
-        self.battle_hit_cards: Dict[int, Dict[str, int]] = {}  # battle_id -> {card_id: token_count}
+        self.battle_confirmed_tokens: Dict[int, List[Token]] = {}
+        self.battle_hit_cards: Dict[int, Dict[str, int]] = {}
         
         # Token tracking with immediate tracking
-        self.tracked_tokens: Dict[int, TrackedToken] = {}  # token_id -> TrackedToken (all tokens, confirmed or not)
+        self.tracked_tokens: Dict[int, TrackedToken] = {}
         self.next_token_id = 1
-        self.confirmation_threshold = 15  # Frames required for confirmation
-        self.max_token_lost_frames = 10  # Remove token after this many lost frames
-        self.max_match_distance = 20.0  # Maximum distance to match detection to tracked token
+        self.confirmation_threshold = 15
+        self.max_token_lost_frames = 10
+        self.max_match_distance = 20.0
         self.current_frame = 0
-    
+        
+        # Visualization setup
+        self.enable_visualization = enable_visualization
+        self.viz_output_dir = Path(viz_output_dir)
+        if enable_visualization:
+            self.viz_output_dir.mkdir(parents=True, exist_ok=True)
+        self.viz_frame_number = 0
+
     def _create_tracker(self):
         # return cv2.legacy.TrackerCSRT_create()
         return cv2.legacy.TrackerKCF_create()
@@ -179,10 +188,11 @@ class TokenDetector:
         return best_match_id
     
     def detect_tokens_for_battles(self, frame: np.ndarray, battles: List, 
-                                  board_corners: Optional[np.ndarray] = None) -> Dict[int, List[Dict]]:
+                              board_corners: Optional[np.ndarray] = None) -> Dict[int, List[Dict]]:
         """Detect tokens in regions above active battles
         """
         self.current_frame += 1
+        self.viz_frame_number += 1
         
         # Update existing token trackers first
         self._update_token_trackers(frame)
@@ -207,19 +217,30 @@ class TokenDetector:
         mask2 = cv2.inRange(hsv, self.lower_red2, self.upper_red2)
         red_mask = cv2.bitwise_or(mask1, mask2)
         
+        # Store intermediate steps for visualization
+        red_mask_before_morph = red_mask.copy()
+        
         # Morphological operations with circular kernels
         kernel_small = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         kernel_large = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
         
         red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel_small, iterations=1)
+        red_mask_after_open = red_mask.copy()
+        
         red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel_large, iterations=2)
+        red_mask_after_close = red_mask.copy()
+        
         red_mask = cv2.dilate(red_mask, kernel_small, iterations=1)
+        red_mask_after_dilate = red_mask.copy()
         
         # Apply Gaussian blur
+        red_mask_before_blur = red_mask.copy()
         if self.hough_edge_blur > 0:
             red_mask = cv2.GaussianBlur(red_mask, (self.hough_edge_blur, self.hough_edge_blur), 0)
         
         battle_token_candidates = {}
+        all_search_regions = []
+        all_circles = []
         
         for battle in battles:
             # Use new battle structure
@@ -229,6 +250,7 @@ class TokenDetector:
             # Get search region
             search_region = self._get_battle_search_region((bx, by, bw, bh))
             sx, sy, sw, sh = search_region
+            all_search_regions.append((search_region, battle_id))
             
             # Create region mask
             region_mask = self._create_region_mask(frame.shape[:2], search_region)
@@ -278,12 +300,29 @@ class TokenDetector:
                         'team': team,
                         'battle_id': battle_id
                     })
+                    
+                    all_circles.append((cx, cy, radius, team, battle_id))
             
             if candidates:
                 battle_token_candidates[battle_id] = candidates
         
+        # Check if we should save visualization (every 100 frames AND at least one token detected)
+        save_viz = (self.enable_visualization and 
+                self.viz_frame_number % 100 == 0 and 
+                len(all_circles) > 0)
+        
+        if save_viz:
+            
+            save_token_detection_visualization(
+                self.viz_output_dir, self.viz_frame_number,
+                frame, hsv, mask1, mask2, red_mask_before_morph,
+                red_mask_after_open, red_mask_after_close, 
+                red_mask_after_dilate, red_mask_before_blur, red_mask,
+                all_search_regions, all_circles, battles,
+                min_radius, max_radius, min_dist
+            )
+        
         return battle_token_candidates
-    
     def update_battle_tokens(self, battle_token_candidates: Dict[int, List[Dict]], 
                             battles: List, tracked_objects: Dict, frame: np.ndarray) -> None:
         """Update token tracking - track immediately, confirm after stability threshold"""

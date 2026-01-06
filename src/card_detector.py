@@ -3,7 +3,7 @@ import numpy as np
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Dict
 from pathlib import Path
-from visualization import save_detection_visualization
+from detection_steps_viz import save_detection_visualization
 
 @dataclass
 class DetectionParams:
