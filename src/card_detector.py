@@ -3,18 +3,10 @@ import numpy as np
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Dict
 from pathlib import Path
-from visualization import Visualizer
+from visualization import save_detection_visualization
 
 @dataclass
 class DetectionParams:
-    # Harsher parameters for better adjacent card separation
-    blur_size: int = 9  # Heavy blur to remove internal card details
-    canny_low: int = 50
-    canny_high: int = 150
-    edge_dilate_size: int = 3  # Minimal dilation to preserve card boundaries
-    edge_dilate_iterations: int = 1
-    distance_threshold: float = 0.5  # High threshold for confident card centers
-    background_iterations: int = 2  # Less expansion = better separation
     min_area: int = 10000
     max_area: int = 15000
     min_aspect: float = 1.3
@@ -69,9 +61,11 @@ class CardDetector:
         
         # Visualization setup
         self.enable_visualization = enable_visualization
+        self.viz_output_dir = Path(viz_output_dir)
         if enable_visualization:
-            self.visualizer = Visualizer(viz_output_dir)
-        
+            self.viz_output_dir.mkdir(parents=True, exist_ok=True)
+        self.viz_frame_number = 0
+
     def _create_tracker(self):
         return cv2.legacy.TrackerKCF_create()
 
@@ -114,22 +108,22 @@ class CardDetector:
         return len(keypoints) > 15
     
     def _detect_cards_only(self, frame):
-        """Simplified 9-step watershed with harsher parameters for adjacent card separation"""
-        save_viz = self.enable_visualization and (self.visualizer.frame_number % 500 == 0)
+        self.viz_frame_number += 1
+        save_viz = self.enable_visualization and (self.viz_frame_number % 500 == 0)
         
         # Step 1: Grayscale
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
-        # Step 2: Heavy blur (9x9) - removes internal card details
-        blur = cv2.GaussianBlur(gray, (self.params.blur_size, self.params.blur_size), 0)
+        # Step 2: Blur (9x9) - removes internal card details
+        blur = cv2.GaussianBlur(gray, (9, 9), 0)
         
-        # Step 3: Direct Canny edge detection
-        edges = cv2.Canny(blur, self.params.canny_low, self.params.canny_high)
+        # Step 3: Canny edge detection
+        edges = cv2.Canny(blur, 50, 150)
         
-        # Step 4: Minimal dilation (3x3, 1 iteration) - preserves boundaries
+        # Step 4: Dilation (3x3, 1 iteration)
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, 
-                                        (self.params.edge_dilate_size, self.params.edge_dilate_size))
-        dilated = cv2.dilate(edges, kernel, iterations=self.params.edge_dilate_iterations)
+                                        (3, 3))
+        dilated = cv2.dilate(edges, kernel, iterations=1)
         
         # Step 5: Fill mask from contours
         contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -141,13 +135,13 @@ class CardDetector:
         # Step 6: Distance transform
         dist = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
         
-        # Step 7: High threshold (0.5) for confident centers
-        _, fg = cv2.threshold(dist, self.params.distance_threshold * dist.max(), 255, 0)
+        # Step 7: Threshold (0.5) for confident centers
+        _, fg = cv2.threshold(dist, 0.5 * dist.max(), 255, 0)
         fg = np.uint8(fg)
         
-        # Step 8: Less background expansion (2 iterations)
+        # Step 8: Background expansion (2 iterations)
         kernel2 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        bg = cv2.dilate(mask, kernel2, iterations=self.params.background_iterations)
+        bg = cv2.dilate(mask, kernel2, iterations=2)
         
         # Step 9: Unknown region
         unknown = cv2.subtract(bg, fg)
@@ -192,10 +186,11 @@ class CardDetector:
         
         # Save visualization if needed
         if save_viz:
-            self.visualizer.save_detection_visualization(
+            save_detection_visualization(
+                self.viz_output_dir, self.viz_frame_number,
                 frame, gray, blur, edges, dilated, mask, 
-                dist, fg, bg, unknown, markers_copy, markers,
-                self.params, cards
+                dist, fg, bg, unknown, markers,
+                cards
             )
         
         return cards

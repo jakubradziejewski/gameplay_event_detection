@@ -6,10 +6,13 @@ from collections import deque
 from card_detector import CardDetector
 from board_detector import BoardDetector
 from token_detector import TokenDetector
-from visualization import Visualizer
+from visualization import (
+    draw_scoreboard, draw_board, draw_cards, draw_battles,
+    draw_events, draw_token_messages, draw_stats
+)
 
 # Configuration
-VIDEO_PATH = "data/easy/easy3.mp4"
+VIDEO_PATH = "data/hard/hard.mp4"
 OUTPUT_DIR = "output_video_tokens"
 
 class GameEventTracker:
@@ -131,11 +134,7 @@ def main():
     detector = CardDetector(enable_visualization=True)
     tracker = GameEventTracker()
     token_detector = TokenDetector()
-    visualizer = Visualizer()
 
-    print(f"Parameters: Card area={detector.params.min_area}-{detector.params.max_area}, "
-          f"Aspect={detector.params.min_aspect:.1f}-{detector.params.max_aspect:.1f}, "
-          f"Battle buffer={detector.params.battle_proximity_buffer*100:.0f}%")
     print(f"Token detection: radius ratio={token_detector.min_radius_ratio}-{token_detector.max_radius_ratio}, "
           f"Hough param2={token_detector.hough_param2}")
     
@@ -164,14 +163,14 @@ def main():
         # Get token messages
         token_messages = token_detector.get_battle_messages(battles)
 
-        # Draw everything using the visualizer
-        visualizer.draw_scoreboard(frame, scores, width)
-        visualizer.draw_board(frame, curr_board)
-        visualizer.draw_battles(frame, battles, token_detector)
-        visualizer.draw_cards(frame, cards)
-        visualizer.draw_events(frame, events, width)
-        visualizer.draw_token_messages(frame, token_messages, width, height)
-        visualizer.draw_stats(frame, frame_count, total, len(cards), len(battles), height)
+        # Draw everything using visualization functions
+        draw_scoreboard(frame, scores, width)
+        draw_board(frame, curr_board)
+        draw_battles(frame, battles, token_detector)
+        draw_cards(frame, cards)
+        draw_events(frame, events, width)
+        draw_token_messages(frame, token_messages, width, height)
+        draw_stats(frame, frame_count, total, len(cards), len(battles), height)
 
         out.write(frame)
         frame_count += 1
@@ -190,7 +189,6 @@ def main():
     print("\nSummary:")
     print(f"Frames: {frame_count} | Time: {elapsed:.2f}s ({frame_count/elapsed:.2f} fps)")
     print(f"Final Score - Team A: {scores['A']}, Team B: {scores['B']}")
-    print(f"Total tokens detected: {sum(len(t) for t in token_detector.battle_tokens.values())}")
     print(f"Output: {output_dir / f'detected_{video_path.stem}.mp4'}")
 
 
