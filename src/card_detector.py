@@ -3,17 +3,23 @@ import numpy as np
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Dict
 from pathlib import Path
+from visualization import Visualizer
 
 @dataclass
 class DetectionParams:
-    gradient_threshold: int = 30
+    # Harsher parameters for better adjacent card separation
+    blur_size: int = 9  # Heavy blur to remove internal card details
     canny_low: int = 50
     canny_high: int = 150
+    edge_dilate_size: int = 3  # Minimal dilation to preserve card boundaries
+    edge_dilate_iterations: int = 1
+    distance_threshold: float = 0.5  # High threshold for confident card centers
+    background_iterations: int = 2  # Less expansion = better separation
     min_area: int = 10000
     max_area: int = 15000
     min_aspect: float = 1.3
     max_aspect: float = 2.4
-    battle_proximity_buffer: float = 0.10  # 10% buffer for battle detection
+    battle_proximity_buffer: float = 0.10
 
 @dataclass
 class Card:
@@ -50,7 +56,7 @@ class TrackedObject:
     last_valid_box: Optional[np.ndarray] = None
 
 class CardDetector:
-    def __init__(self, params=None):
+    def __init__(self, params=None, enable_visualization=False, viz_output_dir="output_visualization"):
         self.params = params or DetectionParams()
         self.next_id = 1
         self.tracked_objects: Dict[int, TrackedObject] = {}
@@ -60,9 +66,11 @@ class CardDetector:
         self.current_frame = 0
         self.board_center_x = None
         self.edge_buffer = None
-        self.viz_dir = Path("output_visualization")
-        self.viz_dir.mkdir(parents=True, exist_ok=True)
-        self.frame_number = 0
+        
+        # Visualization setup
+        self.enable_visualization = enable_visualization
+        if enable_visualization:
+            self.visualizer = Visualizer(viz_output_dir)
         
     def _create_tracker(self):
         return cv2.legacy.TrackerKCF_create()
@@ -105,30 +113,25 @@ class CardDetector:
         # A card should have dozens of keypoints; an empty cell will have very few
         return len(keypoints) > 15
     
-    
     def _detect_cards_only(self, frame):
-        """Original watershed detection - proven to work for adjacent cards"""
-        self.frame_number += 1
-        save_viz = (self.frame_number % 500 == 0)
+        """Simplified 9-step watershed with harsher parameters for adjacent card separation"""
+        save_viz = self.enable_visualization and (self.visualizer.frame_number % 500 == 0)
         
+        # Step 1: Grayscale
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        blur = cv2.GaussianBlur(gray, (5, 5), 0)
         
-        # Step 1: Morphological gradient
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        grad = cv2.morphologyEx(blur, cv2.MORPH_GRADIENT, kernel)
+        # Step 2: Heavy blur (9x9) - removes internal card details
+        blur = cv2.GaussianBlur(gray, (self.params.blur_size, self.params.blur_size), 0)
         
-        # Step 2: Threshold gradient
-        _, grad_bin = cv2.threshold(grad, self.params.gradient_threshold, 255, cv2.THRESH_BINARY)
+        # Step 3: Direct Canny edge detection
+        edges = cv2.Canny(blur, self.params.canny_low, self.params.canny_high)
         
-        # Step 3: Canny edges
-        edges = cv2.Canny(grad_bin, self.params.canny_low, self.params.canny_high)
+        # Step 4: Minimal dilation (3x3, 1 iteration) - preserves boundaries
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, 
+                                        (self.params.edge_dilate_size, self.params.edge_dilate_size))
+        dilated = cv2.dilate(edges, kernel, iterations=self.params.edge_dilate_iterations)
         
-        # Step 4: Dilate edges
-        kernel2 = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-        dilated = cv2.dilate(edges, kernel2, iterations=2)
-        
-        # Step 5: Create mask from contours
+        # Step 5: Fill mask from contours
         contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         mask = np.zeros_like(gray)
         for c in contours:
@@ -137,29 +140,25 @@ class CardDetector:
         
         # Step 6: Distance transform
         dist = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
-        _, fg = cv2.threshold(dist, 0.4 * dist.max(), 255, 0)
+        
+        # Step 7: High threshold (0.5) for confident centers
+        _, fg = cv2.threshold(dist, self.params.distance_threshold * dist.max(), 255, 0)
         fg = np.uint8(fg)
         
-        # Step 7: Background
-        bg = cv2.dilate(mask, kernel2, iterations=3)
+        # Step 8: Less background expansion (2 iterations)
+        kernel2 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        bg = cv2.dilate(mask, kernel2, iterations=self.params.background_iterations)
         
-        # Step 8: Unknown region
+        # Step 9: Unknown region
         unknown = cv2.subtract(bg, fg)
         
-        # Step 9: Markers
+        # Watershed markers
         _, markers = cv2.connectedComponents(fg)
         markers = markers + 1
         markers[unknown == 255] = 0
         
-        # Step 10: Watershed
         markers_copy = markers.copy()
         markers = cv2.watershed(frame, markers)
-        
-        # Save visualization if needed
-        if save_viz:
-            self._save_visualization(frame, gray, blur, grad, grad_bin, edges, 
-                                    dilated, mask, dist, fg, bg, unknown, 
-                                    markers_copy, markers)
         
         # Extract cards
         cards = []
@@ -191,91 +190,16 @@ class CardDetector:
                 if self._has_enough_features(gray, box):
                     cards.append(Card(box=box, center=rect[0], width=w, height=h))
         
+        # Save visualization if needed
+        if save_viz:
+            self.visualizer.save_detection_visualization(
+                frame, gray, blur, edges, dilated, mask, 
+                dist, fg, bg, unknown, markers_copy, markers,
+                self.params, cards
+            )
+        
         return cards
-
-    def _save_visualization(self, frame, gray, blur, grad, grad_bin, edges, 
-                        dilated, mask, dist, fg, bg, unknown, markers_pre, markers_post):
-        """Save step-by-step visualization with performance metrics"""
-        
-        # Normalize distance transform for display
-        dist_vis = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-        
-        # Convert markers to color visualization
-        markers_color = np.zeros_like(frame)
-        num_cards_detected = 0
-        for label in np.unique(markers_post):
-            if label == -1:  # Watershed boundaries (RED - separation lines)
-                markers_color[markers_post == -1] = [0, 0, 255]
-            elif label > 1:
-                num_cards_detected += 1
-                # Random color for each region
-                color = np.random.randint(0, 255, 3).tolist()
-                markers_color[markers_post == label] = color
-        
-        # Create grid of images
-        row1 = np.hstack([
-            cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR),
-            cv2.cvtColor(blur, cv2.COLOR_GRAY2BGR),
-            cv2.cvtColor(grad, cv2.COLOR_GRAY2BGR)
-        ])
-        
-        row2 = np.hstack([
-            cv2.cvtColor(grad_bin, cv2.COLOR_GRAY2BGR),
-            cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR),
-            cv2.cvtColor(dilated, cv2.COLOR_GRAY2BGR)
-        ])
-        
-        row3 = np.hstack([
-            cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR),
-            cv2.applyColorMap(dist_vis, cv2.COLORMAP_JET),
-            cv2.cvtColor(fg, cv2.COLOR_GRAY2BGR)
-        ])
-        
-        row4 = np.hstack([
-            cv2.cvtColor(bg, cv2.COLOR_GRAY2BGR),
-            cv2.cvtColor(unknown, cv2.COLOR_GRAY2BGR),
-            markers_color
-        ])
-        
-        # Stack all rows
-        grid = np.vstack([row1, row2, row3, row4])
-        
-        # Add labels with better styling
-        labels = [
-            ["1. Grayscale", "2. Gaussian Blur", "3. Morph Gradient"],
-            ["4. Gradient Binary", "5. Canny Edges", "6. Dilated Edges"],
-            ["7. Contour Mask", "8. Distance Transform", "9. Foreground"],
-            ["10. Background", "11. Unknown Region", "12. Watershed (RED=boundaries)"]
-        ]
-        
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        h, w = gray.shape
-        for i, row_labels in enumerate(labels):
-            for j, label in enumerate(row_labels):
-                y = i * h + 30
-                x = j * w + 10
-                # Add black outline for better visibility
-                cv2.putText(grid, label, (x, y), font, 0.6, (0, 0, 0), 3)
-                cv2.putText(grid, label, (x, y), font, 0.6, (0, 255, 255), 2)
-        
-        # Add comprehensive summary
-        summary_height = 80
-        summary_panel = np.zeros((summary_height, grid.shape[1], 3), dtype=np.uint8)
-        
-        summary_line1 = f"Frame: {self.frame_number} | Regions detected: {num_cards_detected}"
-        summary_line2 = f"Pipeline: Full 12-step watershed (optimized for adjacent card separation)"
-        
-        cv2.putText(summary_panel, summary_line1, (20, 25), font, 0.7, (255, 255, 255), 2)
-        cv2.putText(summary_panel, summary_line2, (20, 55), font, 0.6, (200, 200, 200), 1)
-        
-        # Combine grid with summary
-        final_grid = np.vstack([grid, summary_panel])
-        
-        # Save
-        output_path = self.viz_dir / f"frame_{self.frame_number:06d}.jpg"
-        cv2.imwrite(str(output_path), final_grid)
-        print(f"Saved visualization: {output_path}")
-        
+            
     def _detect_battles_from_cards(self, cards: List[Card]):
         """Detect battles by checking if opposing team cards are close to each other"""
         
@@ -316,7 +240,7 @@ class CardDetector:
                             team1=card_a.team,
                             team2=card_b.team,
                             initial_center=battle_center,
-                            last_valid_bbox=battle_bbox,  # Initialize with current bbox
+                            last_valid_bbox=battle_bbox,
                             card1_in_zone=True,
                             card2_in_zone=True
                         )
@@ -395,16 +319,13 @@ class CardDetector:
                 
                 # Track who left the zone first
                 if battle.card1_in_zone and not card1_still_in:
-                    # Card 1 just left the battle zone - they lose
                     battles_to_remove.append(battle_id)
                     battle_events.append(f"Card {battle.card1_id} ({battle.team1}) lost the battle")
                 elif battle.card2_in_zone and not card2_still_in:
-                    # Card 2 just left the battle zone - they lose
                     battles_to_remove.append(battle_id)
                     battle_events.append(f"Card {battle.card2_id} ({battle.team2}) lost the battle")
                 elif not self._are_cards_in_battle(card1, card2):
-                    # Both cards moved too far apart (no longer touching with buffer)
-                    # Use distance from initial battle center as tiebreaker
+                    # Both cards moved too far apart
                     dist1 = np.sqrt((card1.center[0] - battle.initial_center[0])**2 + 
                                   (card1.center[1] - battle.initial_center[1])**2)
                     dist2 = np.sqrt((card2.center[0] - battle.initial_center[0])**2 + 
@@ -422,15 +343,12 @@ class CardDetector:
                     battle.card2_in_zone = card2_still_in
                     
             elif card1_exists and not card2_exists:
-                # Card 2 disappeared - Card 2 lost
                 battles_to_remove.append(battle_id)
                 battle_events.append(f"Card {battle.card2_id} ({battle.team2}) lost the battle")
             elif card2_exists and not card1_exists:
-                # Card 1 disappeared - Card 1 lost
                 battles_to_remove.append(battle_id)
                 battle_events.append(f"Card {battle.card1_id} ({battle.team1}) lost the battle")
             else:
-                # Both cards disappeared - just end battle
                 battles_to_remove.append(battle_id)
         
         # Remove ended battles
@@ -445,13 +363,11 @@ class CardDetector:
     
     def _is_card_in_battle_zone(self, card: Card, battle: Battle) -> bool:
         """Check if card center is within the last valid battle bounding box"""
-        # Use last_valid_bbox if available, otherwise use current bbox
         bbox_to_check = battle.last_valid_bbox if battle.last_valid_bbox else battle.bbox
         bx, by, bw, bh = bbox_to_check
         cx, cy = card.center
         
         return bx <= cx <= bx + bw and by <= cy <= by + bh
-
     
     def _merge_overlaps(self, dets):
         if not dets:
