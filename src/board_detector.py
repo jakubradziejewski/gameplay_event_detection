@@ -259,7 +259,7 @@ class BoardDetector:
         
         return rect
     
-    def smooth_detection(self, corners: np.ndarray, window: int = 5) -> np.ndarray:
+    def smooth_detection(self, corners: np.ndarray, window: int = 10) -> np.ndarray:
         """Smooth board detection over multiple frames"""
         
         self.board_history.append(corners)
@@ -268,6 +268,20 @@ class BoardDetector:
             self.board_history.pop(0)
         
         return np.mean(self.board_history, axis=0)
+    
+    def board_movement_distance(self, corners1, corners2):
+        movements = corners2 - corners1
+        mean_movement = np.mean(movements, axis=0)
+        deviations = movements - mean_movement
+    
+        # Weight Y deviations more heavily than X deviations
+        y_weight = 3.0  # Adjust this value to control how much more Y matters
+        weighted_deviations = deviations * np.array([1.0, y_weight])
+    
+        inconsistency = np.sum(weighted_deviations ** 2)
+    
+        return inconsistency
+    
     
     def get_detection_data(self, frame: np.ndarray, threshold: int = 200) -> dict:
         """Get all intermediate detection data for visualization"""
@@ -379,9 +393,9 @@ class BoardDetector:
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
         # threshold for maximum sum of distances between frame corners and previous frames corners to decide that board detected in a frame is valid
-        init_threshold = 50
+        init_threshold = 40
         # if we lose track of board, with each frame we multiplt htreshold by this constant to find board back
-        threshold_multiplier = 1.01
+        threshold_multiplier = 1.1
         detection_threshold = init_threshold
         
         while True:
@@ -401,18 +415,17 @@ class BoardDetector:
                 detected_count += 1
 
                 last_corners_mean = np.mean(self.board_history, axis=0)
-                manhattan_dist_corners = np.sum(np.abs(inner_corners - last_corners_mean))
-                #print(np.sum(np.abs(inner_corners - last_corners_mean)))
+                dist_corners = self.board_movement_distance(inner_corners, last_corners_mean)
 
-                if manhattan_dist_corners < detection_threshold:
+                if dist_corners < detection_threshold:
                     inner_corners = self.smooth_detection(inner_corners)
                     detection_threshold = init_threshold
                 else:
-                    inner_corners = self.board_history[-1] if self.board_history else None
+                    inner_corners = np.mean(self.board_history, axis=0)
                     detection_threshold *= threshold_multiplier
             else:
                 # Use last known position
-                inner_corners = self.board_history[-1] if self.board_history else None
+                inner_corners = np.mean(self.board_history, axis=0)
             
             # Store result
             results.append({
