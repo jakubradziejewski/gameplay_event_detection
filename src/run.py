@@ -13,7 +13,7 @@ from visualization import (
 )
 
 # Configuration
-VIDEO_PATH = "data/medium/medium3.mp4"
+VIDEO_PATH = "data/final-hard1.mp4"
 OUTPUT_DIR = "output_video_tokens"
 
 class GameEventTracker:
@@ -119,8 +119,10 @@ def main():
 
     print(f"Processing {total} frames...")
     
-    # Initialize components
+    # Initialize board detector
     board_detector = BoardDetector(str(video_path))
+    
+    # Calibrate with first frame
     ret, first = cap.read()
     if not ret:
         return
@@ -131,7 +133,7 @@ def main():
     out = cv2.VideoWriter(str(output_dir / f"detected_{video_path.stem}.mp4"),
                          cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
 
-    # Initialize detector with visualization enabled
+    # Initialize other detectors
     detector = CardDetector(enable_visualization=True)
     tracker = GameEventTracker()
     token_detector = TokenDetector(enable_visualization=True, viz_output_dir="output_visualization_tokens")
@@ -149,9 +151,8 @@ def main():
         if not ret:
             break
 
-        # Detect board
-        curr_board = board_detector._detect_inner_from_brightness(frame)
-        curr_board = board_detector.smooth_detection(curr_board) if curr_board is not None else board
+        # Get board corners using full detection logic (smoothing, validation, etc.)
+        curr_board = board_detector.get_current_board(frame)
         
         # Detect cards and battles
         cards, battles = detector.detect_cards(frame, curr_board)
@@ -186,18 +187,24 @@ def main():
         
         if frame_count % 50 == 0:
             elapsed = time.time() - start
+            detection_stats = board_detector.get_detection_stats()
             print(f"Frame {frame_count}/{total} | Speed: {frame_count/elapsed:.2f} fps | "
                   f"Score A:{scores['A']} B:{scores['B']} | "
+                  f"Board: {detection_stats['detected_count']}/{detection_stats['frame_count']} "
+                  f"({detection_stats['detection_rate']*100:.1f}%) | "
                   f"Dice: {len(dice_list)}")
     
     cap.release()
     out.release()
     
     elapsed = time.time() - start
+    detection_stats = board_detector.get_detection_stats()
 
     print("\nSummary:")
     print(f"Frames: {frame_count} | Time: {elapsed:.2f}s ({frame_count/elapsed:.2f} fps)")
     print(f"Final Score - Team A: {scores['A']}, Team B: {scores['B']}")
+    print(f"Board Detection: {detection_stats['detected_count']}/{detection_stats['frame_count']} "
+          f"({detection_stats['detection_rate']*100:.1f}%)")
     print(f"Output: {output_dir / f'detected_{video_path.stem}.mp4'}")
 
 

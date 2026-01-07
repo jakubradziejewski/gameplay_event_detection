@@ -16,15 +16,79 @@ class BoardDetector:
         self.grid_rows = 6
         self.calibration_visualized = False
         
+        # Tracking state for frame-by-frame detection
+        self.init_threshold = 40
+        self.threshold_multiplier = 1.1
+        self.detection_threshold = self.init_threshold
+        self.frame_count = 0
+        self.detected_count = 0
+        
     def calibrate(self, frame: np.ndarray, manual_corners: Optional[np.ndarray] = None):
         """Calibrate detector with first frame"""
         if manual_corners is not None:
             self.inner_board = manual_corners
+            self.board_history.append(manual_corners)
             return manual_corners
         
         inner = self._detect_inner_from_brightness(frame)
         self.inner_board = inner
+        if inner is not None:
+            self.board_history.append(inner)
         return inner
+    
+    def get_current_board(self, frame: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Get board corners for current frame using full detection logic
+        (smoothing, movement validation, adaptive threshold).
+        This is the method to call from main processing loop.
+        
+        Returns:
+            Board corners array or None if no board history exists
+        """
+        self.frame_count += 1
+        
+        # Detect inner board in current frame
+        inner_corners = self._detect_inner_from_brightness(frame, debug=False)
+        
+        if inner_corners is not None:
+            self.detected_count += 1
+            
+            # Validate movement if we have history
+            if len(self.board_history) > 0:
+                last_corners_mean = np.mean(self.board_history, axis=0)
+                dist_corners = self.board_movement_distance(inner_corners, last_corners_mean)
+                
+                if dist_corners < self.detection_threshold:
+                    # Movement is reasonable, smooth and accept
+                    inner_corners = self.smooth_detection(inner_corners)
+                    self.detection_threshold = self.init_threshold
+                else:
+                    # Movement too large, use smoothed history instead
+                    inner_corners = np.mean(self.board_history, axis=0)
+                    self.detection_threshold *= self.threshold_multiplier
+            else:
+                # First detection, just add to history
+                self.board_history.append(inner_corners)
+        else:
+            # No detection, use last known position if available
+            if len(self.board_history) > 0:
+                inner_corners = np.mean(self.board_history, axis=0)
+                self.detection_threshold *= self.threshold_multiplier
+            else:
+                # No history at all, return None
+                return None
+        
+        return inner_corners
+    
+    def get_detection_stats(self) -> dict:
+        """Get current detection statistics"""
+        return {
+            'frame_count': self.frame_count,
+            'detected_count': self.detected_count,
+            'detection_rate': self.detected_count / self.frame_count if self.frame_count > 0 else 0,
+            'detection_threshold': self.detection_threshold,
+            'history_length': len(self.board_history)
+        }
     
     def find_edges_with_white_threshold(self, binary_img, corners, dx=5, threshold_white=0.8):
         """
@@ -387,49 +451,20 @@ class BoardDetector:
         
         # Process all frames
         results = []
-        frame_count = 0
-        detected_count = 0
         
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-
-        # threshold for maximum sum of distances between frame corners and previous frames corners to decide that board detected in a frame is valid
-        init_threshold = 40
-        # if we lose track of board, with each frame we multiplt htreshold by this constant to find board back
-        threshold_multiplier = 1.1
-        detection_threshold = init_threshold
         
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
             
-            frame_count += 1
-            
-            # Detect inner board
-            inner_corners = self._detect_inner_from_brightness(
-                frame, 
-                debug=False
-            )
-            
-            if inner_corners is not None:
-                detected_count += 1
-
-                last_corners_mean = np.mean(self.board_history, axis=0)
-                dist_corners = self.board_movement_distance(inner_corners, last_corners_mean)
-
-                if dist_corners < detection_threshold:
-                    inner_corners = self.smooth_detection(inner_corners)
-                    detection_threshold = init_threshold
-                else:
-                    inner_corners = np.mean(self.board_history, axis=0)
-                    detection_threshold *= threshold_multiplier
-            else:
-                # Use last known position
-                inner_corners = np.mean(self.board_history, axis=0)
+            # Use the same logic as get_current_board
+            inner_corners = self.get_current_board(frame)
             
             # Store result
             results.append({
-                'frame': frame_count,
+                'frame': self.frame_count,
                 'detected': inner_corners is not None,
                 'corners': inner_corners.tolist() if inner_corners is not None else None
             })
@@ -437,16 +472,16 @@ class BoardDetector:
             # Visualize
             if visualize and visualizer and inner_corners is not None:
                 vis_frame = visualizer.draw_detection_on_frame(
-                    frame, inner_corners, frame_count, total_frames, 
-                    detected_count, show_cell_labels, self.grid_cols, self.grid_rows
+                    frame, inner_corners, self.frame_count, total_frames, 
+                    self.detected_count, show_cell_labels, self.grid_cols, self.grid_rows
                 )
                 
                 if out:
                     out.write(vis_frame)
             
-            if frame_count % 100 == 0:
-                print(f"Processed: {frame_count}/{total_frames} frames "
-                      f"({detected_count}/{frame_count} detected)")
+            if self.frame_count % 100 == 0:
+                print(f"Processed: {self.frame_count}/{total_frames} frames "
+                      f"({self.detected_count}/{self.frame_count} detected)")
         
         cap.release()
         if out:
@@ -455,8 +490,8 @@ class BoardDetector:
         print(f"\n{'='*60}")
         print(f"DETECTION SUMMARY")
         print(f"{'='*60}")
-        print(f"Total frames: {frame_count}")
-        print(f"Detected: {detected_count} ({detected_count/frame_count*100:.1f}%)")
+        print(f"Total frames: {self.frame_count}")
+        print(f"Detected: {self.detected_count} ({self.detected_count/self.frame_count*100:.1f}%)")
         print(f"{'='*60}")
         
         # Save results
@@ -464,9 +499,9 @@ class BoardDetector:
         with open(results_path, 'w') as f:
             json.dump({
                 'summary': {
-                    'total_frames': frame_count,
-                    'detected_frames': detected_count,
-                    'detection_rate': detected_count/frame_count,
+                    'total_frames': self.frame_count,
+                    'detected_frames': self.detected_count,
+                    'detection_rate': self.detected_count/self.frame_count,
                     'grid_size': f'{self.grid_cols}x{self.grid_rows}',
                     'detection_method': 'brightness_mask',
                     'brightness_threshold': brightness_threshold
