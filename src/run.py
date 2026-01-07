@@ -13,7 +13,7 @@ from visualization import (
 )
 
 # Configuration
-VIDEO_PATH = "data/final-hard1.mp4"
+VIDEO_PATH = "data/easy/easy4.mp4"
 OUTPUT_DIR = "output_video_tokens"
 
 class GameEventTracker:

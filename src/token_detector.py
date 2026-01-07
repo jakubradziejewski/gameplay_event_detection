@@ -31,14 +31,15 @@ class TrackedToken:
 class TokenDetector:
     def __init__(self, enable_visualization=False, viz_output_dir="output_visualization_tokens"):
         # HSV range for red color (red wraps around in HSV)
-        self.lower_red1 = np.array([0, 60, 60])
-        self.upper_red1 = np.array([15, 255, 255])
-        self.lower_red2 = np.array([155, 60, 60])
-        self.upper_red2 = np.array([180, 255, 255])
-        
+        #self.lower_red1 = np.array([0, 60, 60])
+        #self.upper_red1 = np.array([15, 255, 255])
+        #self.lower_red2 = np.array([155, 60, 60])
+        #self.upper_red2 = np.array([180, 255, 255])
+        self.lower_red = np.array([150, 30, 30])
+        self.upper_red = np.array([180, 255, 255])
         # Size parameters (relative to board size)
-        self.min_radius_ratio = 0.010
-        self.max_radius_ratio = 0.015
+        self.min_radius_ratio = 0.009
+        self.max_radius_ratio = 0.02
         
         # Hough Circle parameters
         self.hough_dp = 1
@@ -227,10 +228,10 @@ class TokenDetector:
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         
         # Create red mask
-        mask1 = cv2.inRange(hsv, self.lower_red1, self.upper_red1)
-        mask2 = cv2.inRange(hsv, self.lower_red2, self.upper_red2)
-        red_mask = cv2.bitwise_or(mask1, mask2)
-        
+        #mask1 = cv2.inRange(hsv, self.lower_red1, self.upper_red1)
+        #mask2 = cv2.inRange(hsv, self.lower_red2, self.upper_red2)
+        #red_mask = cv2.bitwise_or(mask1, mask2)
+        red_mask = cv2.inRange(hsv, self.lower_red, self.upper_red)
         # Store intermediate steps for visualization
         red_mask_before_morph = red_mask.copy()
         
@@ -326,12 +327,10 @@ class TokenDetector:
                 len(all_circles) > 0)
         
         if save_viz:
-            
             save_token_detection_visualization(
                 self.viz_output_dir, self.viz_frame_number,
-                frame, hsv, mask1, mask2, red_mask_before_morph,
-                red_mask_after_open, red_mask_after_close, 
-                red_mask_after_dilate, red_mask_before_blur, red_mask,
+                frame, hsv, red_mask,
+                red_mask_after_open, red_mask_after_close, red_mask,
                 all_search_regions, all_circles, battles,
                 min_radius, max_radius, min_dist
             )

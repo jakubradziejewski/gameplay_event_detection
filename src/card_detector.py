@@ -110,7 +110,7 @@ class CardDetector:
     
     def _detect_cards_only(self, frame):
         self.viz_frame_number += 1
-        save_viz = self.enable_visualization and (self.viz_frame_number % 500 == 0)
+        save_viz = self.enable_visualization and (self.viz_frame_number % 200 == 0)
         
         # Step 1: Grayscale
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -174,12 +174,21 @@ class CardDetector:
             w, h = rect[1]
             if w == 0 or h == 0:
                 continue
+            
+            box = np.int32(cv2.boxPoints(rect))
+            x_coords = box[:, 0]
+            y_coords = box[:, 1]
+            actual_width = np.max(x_coords) - np.min(x_coords)
+            actual_height = np.max(y_coords) - np.min(y_coords)
+
+            # Reject if wider than tall
+            if actual_width > actual_height:
+                continue
+
+            # Now normalize w, h for aspect ratio calculation
             if h < w:
                 w, h = h, w
             aspect = h / w
-            
-            box = np.int32(cv2.boxPoints(rect))
-            
             p = self.params
             if p.min_area <= area <= p.max_area and p.min_aspect <= aspect <= p.max_aspect:
                 if self._has_enough_features(gray, box):
