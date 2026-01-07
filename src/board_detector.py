@@ -17,7 +17,7 @@ class BoardDetector:
         self.calibration_visualized = False
         
         # Tracking state for frame-by-frame detection
-        self.init_threshold = 40
+        self.init_threshold = 300
         self.threshold_multiplier = 1.1
         self.detection_threshold = self.init_threshold
         self.frame_count = 0
@@ -339,7 +339,7 @@ class BoardDetector:
         deviations = movements - mean_movement
     
         # Weight Y deviations more heavily than X deviations
-        y_weight = 3.0  # Adjust this value to control how much more Y matters
+        y_weight = 1.0  # Adjust this value to control how much more Y matters
         weighted_deviations = deviations * np.array([1.0, y_weight])
     
         inconsistency = np.sum(weighted_deviations ** 2)
