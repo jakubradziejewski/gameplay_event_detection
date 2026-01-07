@@ -34,7 +34,7 @@ def draw_dice(frame, dice_list):
         )
         
         # Damage text to the right of the value
-        damage_text = "no damage" if value < 3 else "damage"
+        damage_text = "No Damage" if value < 3 else "Damage"
         damage_color = (0, 0, 255) if value < 3 else (0, 255, 0)  # Red for no damage, Green for damage
         cv2.putText(
             frame,
@@ -51,22 +51,17 @@ def draw_dice(frame, dice_list):
     
     # Semi-transparent background for the text block
     overlay = frame.copy()
-    cv2.rectangle(overlay, (10, start_y), (450, start_y + 80), (0, 0, 0), -1)
+    cv2.rectangle(overlay, (10, start_y), (350, start_y + 80), (0, 0, 0), -1)
     cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
 
     # Dice Count
     cv2.putText(frame, f'Total Dice: {len(dice_list)}', (20, start_y + 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
     
-    # Individual Scores List with Damage Info
+    # Individual Scores List
     if dice_list:
-        scores_with_damage = []
-        for die in dice_list:
-            value = die['value']
-            damage_text = "No Damage" if value < 3 else "Damage"
-            scores_with_damage.append(f"{value}-{damage_text}")
-        
-        score_str = f"Scores: {', '.join(scores_with_damage)}"
+        scores = [str(die['value']) for die in dice_list]
+        score_str = f"Scores: {', '.join(scores)}"
         cv2.putText(frame, score_str, (20, start_y + 65),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 
