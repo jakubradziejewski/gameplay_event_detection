@@ -2,20 +2,16 @@ import cv2
 import numpy as np
 from scipy import ndimage
 from collections import deque
+from pathlib import Path
+from detection_steps_viz import save_dice_detection_visualization
 
 
 class DiceDetector:
     """Detect dice on the game board and track them across frames."""
     
-    def __init__(self, history_length=20, distance_threshold=30, dice_radius=40):
-        """
-        Initialize the dice detector.
-        
-        Args:
-            history_length: Number of frames to track dice for stability
-            distance_threshold: Max pixel distance for matching dice across frames
-            dice_radius: Radius for counting dots on dice faces
-        """
+    def __init__(self, history_length=20, distance_threshold=30, dice_radius=40,
+                 enable_visualization=True, viz_output_dir="output_visualization_dice"):
+
         self.history_length = history_length
         self.distance_threshold = distance_threshold
         self.dice_radius = dice_radius
@@ -23,6 +19,13 @@ class DiceDetector:
         # Tracking history
         self.history = deque(maxlen=history_length)
         self.score_history = deque(maxlen=history_length)
+        
+        # Visualization setup
+        self.enable_visualization = enable_visualization
+        self.viz_output_dir = Path(viz_output_dir)
+        if enable_visualization:
+            self.viz_output_dir.mkdir(parents=True, exist_ok=True)
+        self.viz_frame_number = 0
         
     def _create_component_size_descriptor(self, binary_mask):
         """Create a descriptor where each pixel contains the size of its connected component."""
@@ -110,9 +113,14 @@ class DiceDetector:
                           Order: [top_left, top_right, bottom_right, bottom_left]
         
         Returns:
-            kostki_centers: Binary image with center pixels at 255
+            dice_centers: Binary image with center pixels at 255
             dot_mask: Binary mask for dot counting
+            visualization_data: Dict with intermediate steps for visualization
         """
+        # Check if we should save visualization
+        self.viz_frame_number += 1
+        save_viz = self.enable_visualization and (self.viz_frame_number % 200 == 0)
+        
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
         
@@ -123,7 +131,7 @@ class DiceDetector:
         
         # Morphological closing
         kernel = np.ones((7, 7), np.uint8)
-        mask1_closed = cv2.morphologyEx(mask1, cv2.MORPH_CLOSE, kernel, iterations=4)
+        mask1_closed_before = cv2.morphologyEx(mask1, cv2.MORPH_CLOSE, kernel, iterations=4)
         
         # Extend board corners and create board mask
         extended_corners = self._extend_corners_horizontally(board_corners)
@@ -149,7 +157,7 @@ class DiceDetector:
         ], dtype=np.int32)
         
         cv2.fillPoly(mask_board, [quad], 255)
-        mask1_closed = mask1_closed | mask_board
+        mask1_closed_after = mask1_closed_before | mask_board
         
         # Second threshold for dice detection
         th_adjusted = th_otsu * 1.4
@@ -157,17 +165,29 @@ class DiceDetector:
         mask2_closed = cv2.morphologyEx(mask2, cv2.MORPH_CLOSE, kernel, iterations=2)
         
         # Filter by component size
-        component_size_desc = self._create_component_size_descriptor(mask1_closed)
+        component_size_desc = self._create_component_size_descriptor(mask1_closed_after)
         
         max_threshold = 3000
         min_threshold = 400
-        kostki = mask2_closed & (component_size_desc <= max_threshold) & (component_size_desc > min_threshold)
-        kostki_centers = self._shrink_to_single_pixels(kostki)
+        dice_filtered = mask2_closed & (component_size_desc <= max_threshold) & (component_size_desc > min_threshold)
+        dice_filtered = dice_filtered.astype(np.uint8) * 255
+        dice_centers = self._shrink_to_single_pixels(dice_filtered)
         
         # Create binary mask for dot counting
         _, dot_mask = cv2.threshold(blurred, 120, 255, cv2.THRESH_BINARY)
         
-        return kostki_centers, dot_mask
+        # Store visualization data
+        viz_data = {
+            'mask_board': mask_board,
+            'mask1': mask1,
+            'mask1_closed_before': mask1_closed_before,
+            'mask1_closed_after': mask1_closed_after,
+            'mask2': mask2,
+            'mask2_closed': mask2_closed,
+            'dice_filtered': dice_filtered,
+        }
+        
+        return dice_centers, dot_mask, viz_data
     
     def detect_dice(self, frame, board_corners):
         """
@@ -181,10 +201,10 @@ class DiceDetector:
             List of dicts with keys: 'x', 'y', 'value' for each stable dice
         """
         # Detect dice centers in current frame
-        kostki_centers, binary_mask = self._detect_dice_centers(frame, board_corners)
+        dice_centers, binary_mask, viz_data = self._detect_dice_centers(frame, board_corners)
         
         # Get all detected centers
-        y_coords, x_coords = np.where(kostki_centers == 255)
+        y_coords, x_coords = np.where(dice_centers == 255)
         
         # Compute scores for all detected centers
         scores_dict = {}
@@ -193,7 +213,7 @@ class DiceDetector:
                 binary_mask, x, y, self.dice_radius
             )
             # Subtract 1 to exclude the area around die
-            score = max(0, num_dots - 1)
+            score = min(max(1, num_dots - 1), 6)
             scores_dict[(x, y)] = score
         
         # Create list of current centers
@@ -206,6 +226,23 @@ class DiceDetector:
         
         # Get stable centers if we have enough history
         stable_dice = self._get_stable_centers_with_scores()
+        
+        # Save visualization if enabled
+        save_viz = self.enable_visualization and (self.viz_frame_number % 200 == 0)
+        if save_viz and self.viz_output_dir:
+            save_dice_detection_visualization(
+                self.viz_output_dir, self.viz_frame_number,
+                frame, board_corners,
+                viz_data['mask_board'],
+                viz_data['mask1'],
+                viz_data['mask1_closed_before'],
+                viz_data['mask1_closed_after'],
+                viz_data['mask2'],
+                viz_data['mask2_closed'],
+                viz_data['dice_filtered'],
+                dice_centers,
+                stable_dice
+            )
         
         return stable_dice
     

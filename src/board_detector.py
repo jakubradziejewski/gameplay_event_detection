@@ -3,12 +3,13 @@ import numpy as np
 from pathlib import Path
 from typing import Optional, Tuple, List
 import json
+from detection_steps_viz import save_board_detection_visualization
 
 
 class BoardDetector:
     """Detects Summoner Wars game board using brightness mask and adaptive grid"""
     
-    def __init__(self, video_path: str):
+    def __init__(self, video_path: str, enable_visualization=True, viz_output_dir="output_visualization_board"):
         self.video_path = Path(video_path)
         self.board_history = []
         self.inner_board = None
@@ -22,6 +23,13 @@ class BoardDetector:
         self.detection_threshold = self.init_threshold
         self.frame_count = 0
         self.detected_count = 0
+        
+        # Visualization setup
+        self.enable_visualization = enable_visualization
+        self.viz_output_dir = Path(viz_output_dir)
+        if enable_visualization:
+            self.viz_output_dir.mkdir(parents=True, exist_ok=True)
+        self.viz_frame_number = 0
         
     def calibrate(self, frame: np.ndarray, manual_corners: Optional[np.ndarray] = None):
         """Calibrate detector with first frame"""
@@ -251,6 +259,10 @@ class BoardDetector:
                                       debug: bool = False) -> Optional[np.ndarray]:
         """Detect inner board using brightness mask (white/bright area)"""
         
+        # Check if we should save visualization
+        self.viz_frame_number += 1
+        save_viz = self.enable_visualization and (self.viz_frame_number % 200 == 0)
+        
         # Step 1: Convert to grayscale
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
@@ -260,14 +272,14 @@ class BoardDetector:
         # Step 3: Otsu threshold to get bright areas
         th_otsu = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[0]
         th_adjusted = th_otsu * 1.1
-        _, mask = cv2.threshold(blurred, th_adjusted, 255, cv2.THRESH_BINARY)
+        _, mask_otsu = cv2.threshold(blurred, th_adjusted, 255, cv2.THRESH_BINARY)
         
         # Step 4: Morphological opening (remove noise)
         kernel = np.ones((7, 7), np.uint8)
-        mask_cleaned = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
+        mask_opened = cv2.morphologyEx(mask_otsu, cv2.MORPH_OPEN, kernel, iterations=2)
         
         # Step 5: Find contours
-        contours, _ = cv2.findContours(mask_cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(mask_opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         if not contours:
             if debug:
@@ -275,10 +287,10 @@ class BoardDetector:
             return None
         
         # Step 6: Get the largest bright contour (should be the board)
-        largest = max(contours, key=cv2.contourArea)
+        largest_contour = max(contours, key=cv2.contourArea)
         
         # Check if area is reasonable
-        area = cv2.contourArea(largest)
+        area = cv2.contourArea(largest_contour)
         frame_area = frame.shape[0] * frame.shape[1]
         area_percent = area / frame_area * 100
         
@@ -290,19 +302,29 @@ class BoardDetector:
                 print(f"  ⚠️ Detected area too small: {area_percent:.1f}%")
             return None
         
-        x, y, w, h = cv2.boundingRect(largest)
-        corners = np.array([
+        x, y, w, h = cv2.boundingRect(largest_contour)
+        bounding_rect_corners = np.array([
             [x, y],
             [x + w, y],
             [x + w, y + h],
             [x, y + h]
         ], dtype=np.float32)
 
-        corners_updated = self.find_edges_with_white_threshold(mask_cleaned, corners, dx=5, threshold_white=0.8)
-        corners_refined = self.refine_both_edges(mask_cleaned, corners_updated, dx=5, threshold_refine=1.001)
+        corners_after_white = self.find_edges_with_white_threshold(
+            mask_opened, bounding_rect_corners, dx=5, threshold_white=0.8)
+        final_corners = self.refine_both_edges(
+            mask_opened, corners_after_white, dx=5, threshold_refine=1.001)
         
         # Order corners properly
-        ordered_corners = self._order_points(corners_refined)
+        ordered_corners = self._order_points(final_corners)
+        
+        # Save visualization if enabled
+        if save_viz and self.viz_output_dir:
+            save_board_detection_visualization(
+                self.viz_output_dir, self.viz_frame_number,
+                frame, mask_otsu, mask_opened, largest_contour,
+                bounding_rect_corners, corners_after_white, ordered_corners
+            )
         
         return ordered_corners
     
