@@ -67,7 +67,6 @@ class CardDetector:
         self.viz_frame_number = 0
 
     def _create_tracker(self):
-        #return cv2.legacy.TrackerCSRT_create()
         return cv2.legacy.TrackerKCF_create()
 
     def _assign_team(self, center: Tuple[float, float]) -> str:

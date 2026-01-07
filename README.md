@@ -17,3 +17,7 @@ This project uses `uv` for extremely fast and reproducible dependency management
    ```bash
    uv sync
    ```
+3. To run the project after downloading data from Google Drive into data/ folder
+   ```bash
+   python src/run.py
+   ```

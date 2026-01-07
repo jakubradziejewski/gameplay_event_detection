@@ -283,7 +283,7 @@ class BoardDetector:
         
         if not contours:
             if debug:
-                print("  ⚠️ No contours found in brightness mask")
+                print("No contours found in brightness mask")
             return None
         
         # Step 6: Get the largest bright contour (should be the board)
@@ -295,11 +295,11 @@ class BoardDetector:
         area_percent = area / frame_area * 100
         
         if debug:
-            print(f"  Largest bright area: {area_percent:.1f}% of frame (need ≥12%)")
+            print(f"Largest bright area: {area_percent:.1f}% of frame (need ≥12%)")
         
         if area < frame_area * 0.12:
             if debug:
-                print(f"  ⚠️ Detected area too small: {area_percent:.1f}%")
+                print(f"Detected area too small: {area_percent:.1f}%")
             return None
         
         x, y, w, h = cv2.boundingRect(largest_contour)
@@ -445,11 +445,8 @@ class BoardDetector:
         # Calibrate with first frame
         ret, first_frame = cap.read()
         if not ret:
-            print("✗ Failed to read first frame")
+            print("Failed to read first frame")
             return
-        
-        print("\nCalibrating...")
-        print("Detecting inner board...")
         
         inner = self._detect_inner_from_brightness(
             first_frame, 
@@ -457,18 +454,12 @@ class BoardDetector:
         )
         
         if inner is None:
-            print("\n✗ Failed to detect inner board")
-            print("\nTROUBLESHOOTING:")
-            print("1. Check visualization outputs for analysis")
-            print("2. If the board is darker, try lowering brightness_threshold (e.g., 150 or 120)")
-            print("3. If the board is brighter, try increasing it (e.g., 220)")
-            print("4. Make sure the playable board area is significantly brighter than surroundings")
             return
         
         self.board_history.append(inner)
         
         self.inner_board = inner
-        print("\n✓ Board detection calibrated")
+        print("\nBoard detection calibrated")
         print(f"  Inner board corners: {inner.astype(int).tolist()}")
         
         # Process all frames
@@ -509,12 +500,9 @@ class BoardDetector:
         if out:
             out.release()
         
-        print(f"\n{'='*60}")
-        print(f"DETECTION SUMMARY")
-        print(f"{'='*60}")
         print(f"Total frames: {self.frame_count}")
         print(f"Detected: {self.detected_count} ({self.detected_count/self.frame_count*100:.1f}%)")
-        print(f"{'='*60}")
+
         
         # Save results
         results_path = self.video_path.parent / f"{self.video_path.stem}_board_detection.json"
@@ -531,5 +519,5 @@ class BoardDetector:
                 'frames': results
             }, f, indent=2)
         
-        print(f"✓ Results saved: {results_path}")
+        print(f"Results saved: {results_path}")
         return results
