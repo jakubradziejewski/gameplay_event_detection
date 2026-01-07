@@ -13,7 +13,7 @@ BOARD_COLOR = (255, 255, 0)
 def draw_dice(frame, dice_list):
     """
     Draws markers on each die and a single info block.
-    Shows individual scores only, no totals or sums.
+    Shows individual scores with damage status.
     """
     # 1. Draw individual markers on the dice in the image
     for die in dice_list:
@@ -32,23 +32,41 @@ def draw_dice(frame, dice_list):
             (0, 0, 255), 
             2
         )
+        
+        # Damage text to the right of the value
+        damage_text = "no damage" if value < 3 else "damage"
+        damage_color = (0, 0, 255) if value < 3 else (0, 255, 0)  # Red for no damage, Green for damage
+        cv2.putText(
+            frame,
+            damage_text,
+            (x + 25, y - 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            damage_color,
+            2
+        )
 
     # Starting Y position
     start_y = 120 
     
     # Semi-transparent background for the text block
     overlay = frame.copy()
-    cv2.rectangle(overlay, (10, start_y), (350, start_y + 80), (0, 0, 0), -1)
+    cv2.rectangle(overlay, (10, start_y), (450, start_y + 80), (0, 0, 0), -1)
     cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
 
     # Dice Count
     cv2.putText(frame, f'Total Dice: {len(dice_list)}', (20, start_y + 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
     
-    # Individual Scores List
+    # Individual Scores List with Damage Info
     if dice_list:
-        scores = [str(die['value']) for die in dice_list]
-        score_str = f"Scores: {', '.join(scores)}"
+        scores_with_damage = []
+        for die in dice_list:
+            value = die['value']
+            damage_text = "No Damage" if value < 3 else "Damage"
+            scores_with_damage.append(f"{value}-{damage_text}")
+        
+        score_str = f"Scores: {', '.join(scores_with_damage)}"
         cv2.putText(frame, score_str, (20, start_y + 65),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 

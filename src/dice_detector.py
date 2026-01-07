@@ -213,7 +213,7 @@ class DiceDetector:
                 binary_mask, x, y, self.dice_radius
             )
             # Subtract 1 to exclude the area around die
-            score = max(0, num_dots - 1)
+            score = min(max(1, num_dots - 1), 6)
             scores_dict[(x, y)] = score
         
         # Create list of current centers
