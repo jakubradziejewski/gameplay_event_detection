@@ -5,7 +5,7 @@ from typing import List, Tuple, Dict
 
 # Color constants
 TEAM_COLORS = {'A': (255, 0, 0), 'B': (0, 255, 0)}
-TOKEN_COLORS = {'A': (255, 0, 255), 'B': (255, 255, 0)}  # Violet for A, Cyan for B
+TOKEN_COLORS = {'A': (255, 0, 255), 'B': (255, 255, 0)}
 BATTLE_COLOR = (0, 0, 255)
 BOARD_COLOR = (255, 255, 0)
 
@@ -93,6 +93,7 @@ def get_bottom_point(box: np.ndarray) -> np.ndarray:
 
 def draw_scoreboard(frame: np.ndarray, scores: Dict[str, int], width: int):
     """Draw the scoreboard at the top of the frame"""
+
     # Semi-transparent black background
     overlay = frame.copy()
     cv2.rectangle(overlay, (0, 0), (width, 60), (0, 0, 0), -1)
@@ -115,18 +116,25 @@ def draw_scoreboard(frame: np.ndarray, scores: Dict[str, int], width: int):
 
 
 def draw_events(frame: np.ndarray, events: List[str], width: int):
-    """Draw the most recent event message"""
+    """Draw the last two event messages"""
     if not events:
         return
     
-    event = events[-1]
     font = cv2.FONT_HERSHEY_SIMPLEX
-    (tw, th), _ = cv2.getTextSize(event, font, 0.8, 2)
-    x = (width - tw) // 2 
     y = 80
     
-    draw_text_with_bg(frame, event, (x, y), (255, 255, 255), 
-                      font_scale=0.8, bg_alpha=0.8)
+    # Get only the last 2 events
+    events_to_show = events[-2:] if len(events) >= 2 else events
+    
+    # Draw them stacked vertically
+    for event in events_to_show:
+        (tw, th), _ = cv2.getTextSize(event, font, 0.8, 2)
+        x = (width - tw) // 2
+        
+        draw_text_with_bg(frame, event, (x, y), (255, 255, 255), 
+                          font_scale=0.8, bg_alpha=0.8)
+        
+        y += 35  # Move down for next message
 
 
 def draw_token_messages(frame: np.ndarray, messages: Dict[int, str], 
@@ -135,7 +143,9 @@ def draw_token_messages(frame: np.ndarray, messages: Dict[int, str],
     if not messages:
         return
     
-    y_offset = 120
+    # Start at 90% down the screen
+    y_offset = int(height * 0.9)
+    
     for battle_id, message in messages.items():
         font = cv2.FONT_HERSHEY_SIMPLEX
         (tw, th), _ = cv2.getTextSize(message, font, 0.6, 2)
@@ -165,16 +175,17 @@ def draw_cards(frame: np.ndarray, cards: List):
         # Draw card box
         cv2.drawContours(frame, [card.box], 0, color, 3)
         
-        # Draw label
-        top = get_top_point(card.box)
+        # Get top-left corner of the bounding box
+        top_left = card.box[np.argmin(card.box[:, 0] + card.box[:, 1])]
+        
+        # Create label
         label = f"Card {card.card_id}"
         if card.team:
             label += f" ({card.team})"
         
-        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-        draw_text_with_bg(frame, label, (top[0]-tw//2, top[1]-10), 
+        # Draw label at top-left corner
+        draw_text_with_bg(frame, label, (top_left[0] + 5, top_left[1] + 20), 
                           color, font_scale=0.6)
-
 
 def draw_battles(frame: np.ndarray, battles: List, token_detector=None):
     """Draw all active battles with labels and optional tokens"""

@@ -10,7 +10,7 @@ def save_detection_visualization(output_dir: Path, frame_number: int,
                                 dist: np.ndarray, fg: np.ndarray, 
                                 bg: np.ndarray, unknown: np.ndarray, 
                                 markers_post: np.ndarray, detected_cards: List):
-
+    
     # Normalize distance transform
     dist_vis = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
     dist_vis = cv2.applyColorMap(dist_vis, cv2.COLORMAP_JET)
@@ -20,7 +20,7 @@ def save_detection_visualization(output_dir: Path, frame_number: int,
     num_cards_detected = 0
     for label in np.unique(markers_post):
         if label == -1:
-            markers_color[markers_post == -1] = [0, 0, 255] 
+            markers_color[markers_post == -1] = [0, 0, 255]
         elif label > 1:
             num_cards_detected += 1
             color = np.random.randint(0, 255, 3).tolist()
@@ -32,57 +32,58 @@ def save_detection_visualization(output_dir: Path, frame_number: int,
         cv2.drawContours(final_detection, [card.box], -1, (0, 255, 0), 3)
         center = (int(card.center[0]), int(card.center[1]))
         cv2.circle(final_detection, center, 5, (0, 0, 255), -1)
-    
-    # Prepare 6 images
+
     images = [
         (frame.copy(), "Original Frame"),
-        (cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR), "Edge Detection (Canny)"),
-        (cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR), "Filled Mask"),
+        (cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR), "Grayscale Conversion"),
+        (cv2.cvtColor(blur, cv2.COLOR_GRAY2BGR), "Gaussian Blur (9x9)"),
+        (cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR), "Canny Edge Detection"),
+        (cv2.cvtColor(dilated, cv2.COLOR_GRAY2BGR), "Morphological Dilation"),
+        (cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR), "Filled Contour Mask"),
         (dist_vis, "Distance Transform"),
         (cv2.cvtColor(fg, cv2.COLOR_GRAY2BGR), "Foreground Markers"),
+        (cv2.cvtColor(bg, cv2.COLOR_GRAY2BGR), "Background Region"),
         (markers_color, "Watershed Segmentation"),
     ]
     
-    # Add titles to each image
+    # Add text labels to each image
     font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.7
+    font_scale = 0.8
     thickness = 2
-    for img, title in images:
-        # Add black background for text
-        cv2.rectangle(img, (5, 5), (400, 40), (0, 0, 0), -1)
-        cv2.putText(img, title, (10, 30), font, font_scale, (0, 255, 255), thickness)
     
-    # Create 3x2 grid
+    for img, title in images:
+        text_size = cv2.getTextSize(title, font, font_scale, thickness)[0]
+        cv2.rectangle(img, (5, 5), (text_size[0] + 15, 45), (0, 0, 0), -1)
+        cv2.putText(img, title, (10, 33), font, font_scale, (0, 255, 255), thickness)
+    
+    # Create 5x2 grid
     row1 = np.hstack([images[0][0], images[1][0]])
     row2 = np.hstack([images[2][0], images[3][0]])
     row3 = np.hstack([images[4][0], images[5][0]])
+    row4 = np.hstack([images[6][0], images[7][0]])
+    row5 = np.hstack([images[8][0], images[9][0]])
     
-    grid = np.vstack([row1, row2, row3])
+    grid = np.vstack([row1, row2, row3, row4, row5])
     
-    # Add final detection as bottom panel
+    # Add final detection as an 11th panel (full width)
     final_panel = final_detection.copy()
-    cv2.rectangle(final_panel, (5, 5), (400, 40), (0, 0, 0), -1)
-    cv2.putText(final_panel, "Final Detection", (10, 30), font, font_scale, (0, 255, 255), thickness)
-    
-    # Resize final_panel to match grid width (duplicate horizontally)
+    cv2.rectangle(final_panel, (5, 5), (400, 45), (0, 0, 0), -1)
+    cv2.putText(final_panel, "Final Card Detection", (10, 33), font, font_scale, (0, 255, 255), thickness)
+
     final_panel_wide = np.hstack([final_panel, final_panel])
+    grid = np.vstack([grid, final_panel_wide])
+
+    summary_height = 50
+    summary_panel = np.zeros((summary_height, grid.shape[1], 3), dtype=np.uint8)
+    cv2.putText(summary_panel, f"Frame {frame_number:06d} | Cards Detected: {len(detected_cards)}", 
+               (20, 32), font, 0.7, (255, 255, 255), 2)
     
-    # Stack vertically
-    final_grid = np.vstack([grid, final_panel_wide])
-    
-    # Add summary at bottom
-    summary_height = 60
-    summary_panel = np.zeros((summary_height, final_grid.shape[1], 3), dtype=np.uint8)
-    cv2.putText(summary_panel, f"Frame {frame_number} | Cards Detected: {len(detected_cards)} | Watershed Regions: {num_cards_detected}", 
-               (20, 35), font, 0.6, (255, 255, 255), 1)
-    
-    final_grid = np.vstack([final_grid, summary_panel])
+    final_grid = np.vstack([grid, summary_panel])
     
     # Save to file
     output_path = output_dir / f"frame_{frame_number:06d}.jpg"
     cv2.imwrite(str(output_path), final_grid)
     return output_path
-
 
 def save_token_detection_visualization(output_dir: Path, frame_number: int,
                                       frame: np.ndarray, hsv: np.ndarray,
@@ -112,14 +113,13 @@ def save_token_detection_visualization(output_dir: Path, frame_number: int,
     # Create final result with detected circles and team assignment
     final_result = frame.copy()
     for cx, cy, radius, team, battle_id in detected_circles:
-        color = (255, 0, 255) if team == 'A' else (255, 255, 0)  # Violet for A, Cyan for B
+        color = (255, 0, 255) if team == 'A' else (255, 255, 0)
         cv2.circle(final_result, (cx, cy), radius, color, 3)
         cv2.circle(final_result, (cx, cy), 3, color, -1)
         label = f"Team {team}"
         cv2.putText(final_result, label, (cx + radius + 5, cy),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-    
-    # Prepare 6 images
+
     images = [
         (frame.copy(), "Original Frame"),
         (hsv_vis, "HSV Color Space"),
@@ -134,7 +134,6 @@ def save_token_detection_visualization(output_dir: Path, frame_number: int,
     font_scale = 0.7
     thickness = 2
     for img, title in images:
-        # Add black background for text
         cv2.rectangle(img, (5, 5), (500, 40), (0, 0, 0), -1)
         cv2.putText(img, title, (10, 30), font, font_scale, (0, 255, 255), thickness)
     
@@ -145,7 +144,7 @@ def save_token_detection_visualization(output_dir: Path, frame_number: int,
     
     grid = np.vstack([row1, row2, row3])
     
-    # Add summary at bottom - WIDTH MATCHES GRID
+    # Add summary at bottom
     summary_height = 80
     summary_panel = np.zeros((summary_height, grid.shape[1], 3), dtype=np.uint8)
     

@@ -13,7 +13,7 @@ from visualization import (
 )
 
 # Configuration
-VIDEO_PATH = "data/easy/easy4.mp4"
+VIDEO_PATH = "data/easy/easy22.mp4"
 OUTPUT_DIR = "output_video_tokens"
 
 class GameEventTracker:
@@ -24,8 +24,10 @@ class GameEventTracker:
         self.current_frame = 0
         self.events = deque(maxlen=5)
         self.loser_cooldown_frames = 10
+        self.setup_complete = False
+        self.previous_scores = {'A': 0, 'B': 0}
         
-    def update(self, cards, battles, detector):
+    def update(self, cards, battles, detector, scores):
         self.current_frame += 1
         current_cards = set()
         current_battles = set()
@@ -96,6 +98,24 @@ class GameEventTracker:
         # Update battle tracking
         self.previous_battles = current_battles
         
+        # Check for setup complete - only when both teams have exactly 2 cards
+        if not self.setup_complete:
+            # Count how many "appears" events we've seen total
+            appears_count = sum(1 for e in list(self.events) + new_events if "appears" in e)
+            if appears_count >= 4:
+                    new_events.append("Setup Complete!")
+                    self.setup_complete = True
+
+        # Check for team wins - only after setup complete and score just changed to 0
+        if self.setup_complete:
+            if scores['A'] == 0 and self.previous_scores['A'] != 0:
+                new_events.append("Team B wins!")
+            elif scores['B'] == 0 and self.previous_scores['B'] != 0:
+                new_events.append("Team A wins!")
+        
+        # Update previous scores
+        self.previous_scores = scores.copy()
+        
         # Add new events to queue
         for event in new_events:
             self.events.append(event)
@@ -151,13 +171,13 @@ def main():
         if not ret:
             break
 
-        # Get board corners using full detection logic (smoothing, validation, etc.)
+        # Get board corners using full detection logic
         curr_board = board_detector.get_current_board(frame)
         
         # Detect cards and battles
         cards, battles = detector.detect_cards(frame, curr_board)
         scores = detector.get_team_scores(cards, battles)
-        events = tracker.update(cards, battles, detector)
+        events = tracker.update(cards, battles, detector, scores)
         
         # Detect tokens for active battles
         if battles:
