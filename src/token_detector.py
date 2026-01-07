@@ -26,15 +26,10 @@ class TrackedToken:
     frames_tracked: int = 0  # How many frames this token has been tracked
     frames_lost: int = 0
     last_center: Tuple[float, float] = None
-    is_confirmed: bool = False  # Whether this token is confirmed (stable for N frames)
+    is_confirmed: bool = False  # Whether this token is confirmed
 
 class TokenDetector:
     def __init__(self, enable_visualization=False, viz_output_dir="output_visualization_tokens"):
-        # HSV range for red color (red wraps around in HSV)
-        #self.lower_red1 = np.array([0, 60, 60])
-        #self.upper_red1 = np.array([15, 255, 255])
-        #self.lower_red2 = np.array([155, 60, 60])
-        #self.upper_red2 = np.array([180, 255, 255])
         self.lower_red = np.array([150, 30, 30])
         self.upper_red = np.array([180, 255, 255])
         # Size parameters (relative to board size)
@@ -85,11 +80,10 @@ class TokenDetector:
         bx, by, bw, bh = battle_bbox
 
         # Define search region above and below the battle, excluding the battle box itself
-        search_height = int(bh * 0.75)  # Height of region above AND below battle
+        search_height = int(bh * 0.75) 
         search_y = max(0, by - search_height)
         search_bottom = min(frame_height, by + bh + search_height)
-        
-        # Total height is from top of upper region to bottom of lower region, minus battle box
+
         total_height = search_bottom - search_y
         
         return (bx, search_y, bw, total_height)
@@ -171,15 +165,13 @@ class TokenDetector:
         token = Token(
             center=tracked_token.center,
             radius=tracked_token.radius,
-            color_value=(0, 0, 255),  # Red default
+            color_value=(0, 0, 255), 
             team=tracked_token.team,
             battle_id=battle_id,
             token_id=tracked_token.token_id
         )
         
         self.battle_confirmed_tokens[battle_id].append(token)
-        
-        # Update hit count - this is handled separately via update_hit_counts()
     
     def _match_detection_to_tracked_tokens(self, detection: Dict, battle_id: int) -> Optional[int]:
         """Try to match a detection to an existing tracked token
@@ -204,8 +196,7 @@ class TokenDetector:
     
     def detect_tokens_for_battles(self, frame: np.ndarray, battles: List, 
                               board_corners: Optional[np.ndarray] = None) -> Dict[int, List[Dict]]:
-        """Detect tokens in regions above active battles
-        """
+        """Detect tokens in regions above active battles"""
         self.current_frame += 1
         self.viz_frame_number += 1
         
@@ -228,12 +219,7 @@ class TokenDetector:
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         
         # Create red mask
-        #mask1 = cv2.inRange(hsv, self.lower_red1, self.upper_red1)
-        #mask2 = cv2.inRange(hsv, self.lower_red2, self.upper_red2)
-        #red_mask = cv2.bitwise_or(mask1, mask2)
         red_mask = cv2.inRange(hsv, self.lower_red, self.upper_red)
-        # Store intermediate steps for visualization
-        red_mask_before_morph = red_mask.copy()
         
         # Morphological operations with circular kernels
         kernel_small = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
@@ -246,10 +232,7 @@ class TokenDetector:
         red_mask_after_close = red_mask.copy()
         
         red_mask = cv2.dilate(red_mask, kernel_small, iterations=1)
-        red_mask_after_dilate = red_mask.copy()
-        
-        # Apply Gaussian blur
-        red_mask_before_blur = red_mask.copy()
+
         if self.hough_edge_blur > 0:
             red_mask = cv2.GaussianBlur(red_mask, (self.hough_edge_blur, self.hough_edge_blur), 0)
         
@@ -303,7 +286,7 @@ class TokenDetector:
                     else:
                         team = 'B'
                     
-                    # Get average color
+                    # Get average color of the circle area
                     mask_single = np.zeros(frame.shape[:2], dtype=np.uint8)
                     cv2.circle(mask_single, (cx, cy), radius, 255, -1)
                     mean_color = cv2.mean(frame, mask=mask_single)[:3]
@@ -321,7 +304,7 @@ class TokenDetector:
             if candidates:
                 battle_token_candidates[battle_id] = candidates
         
-        # Check if we should save visualization (every 100 frames AND at least one token detected)
+        # Check if we should save visualization (every 100 frames and at least one token detected)
         save_viz = (self.enable_visualization and 
                 self.viz_frame_number % 100 == 0 and 
                 len(all_circles) > 0)
@@ -340,7 +323,7 @@ class TokenDetector:
                             battles: List, tracked_objects: Dict, frame: np.ndarray) -> None:
         """Update token tracking - track immediately, confirm after stability threshold"""
         
-        # Get set of active battles
+        # Get active battles
         active_battles = {b.battle_id for b in battles}
         
         # Remove tokens for finished battles
@@ -367,7 +350,7 @@ class TokenDetector:
             # Get current frame's detections
             current_detections = battle_token_candidates.get(battle_id, [])
             
-            # Try to match each detection to existing tracked tokens
+            # Match each detection to existing tracked tokens
             for detection in current_detections:
                 matched_token_id = self._match_detection_to_tracked_tokens(detection, battle_id)
                 
@@ -476,7 +459,9 @@ class TokenDetector:
     
     def draw_tokens(self, frame: np.ndarray, battle_id: int, show_unconfirmed: bool = False) -> None:
         """Draw confirmed tokens and optionally unconfirmed tokens for a specific battle"""
-        TEAM_COLORS = {'A': (255, 0, 255), 'B': (255, 255, 0)}  # Violet for A, Cyan for B
+        
+        # Violet for A, Cyan for B
+        TEAM_COLORS = {'A': (255, 0, 255), 'B': (255, 255, 0)}  
         
         # Draw all tracked tokens for this battle
         for token_id, tracked_token in self.tracked_tokens.items():
@@ -502,7 +487,7 @@ class TokenDetector:
                            cv2.FONT_HERSHEY_SIMPLEX, 0.3, dim_color, 1)
     
     def draw_search_regions(self, frame: np.ndarray, battles: List) -> None:
-        """Draw search regions for debugging"""
+        """Draw search regions for visualization"""
         for battle in battles:
             bx, by, bw, bh = battle.bbox
             

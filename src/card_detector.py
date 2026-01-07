@@ -87,11 +87,9 @@ class CardDetector:
         detected_cards = self._merge_overlaps(detected_cards)
         
         all_cards = self._match_and_track(frame, detected_cards, board_corners)
-        
-        # Detect battles from card positions
+
         self._detect_battles_from_cards(all_cards)
-        
-        # Process battles (check if cards left battle zones)
+
         battle_results = self._process_battles(all_cards)
         
         return all_cards, battle_results
@@ -105,7 +103,7 @@ class CardDetector:
         orb = cv2.ORB_create(nfeatures=100)
         keypoints = orb.detect(roi, None)
         
-        # A card should have dozens of keypoints; an empty cell will have very few
+        # A card should have dozens of keypoints, an empty cell has very few. Filters out a lot of false detection of empty cells
         return len(keypoints) > 15
     
     def _detect_cards_only(self, frame):
@@ -122,8 +120,7 @@ class CardDetector:
         edges = cv2.Canny(blur, 50, 150)
         
         # Step 4: Dilation (3x3, 1 iteration)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, 
-                                        (3, 3))
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         dilated = cv2.dilate(edges, kernel, iterations=1)
         
         # Step 5: Fill mask from contours
@@ -185,7 +182,7 @@ class CardDetector:
             if actual_width > actual_height:
                 continue
 
-            # Now normalize w, h for aspect ratio calculation
+            # Normalize w, h for aspect ratio calculation
             if h < w:
                 w, h = h, w
             aspect = h / w
@@ -199,12 +196,12 @@ class CardDetector:
             save_detection_visualization(
                 self.viz_output_dir, self.viz_frame_number,
                 frame, gray, blur, edges, dilated, mask, 
-                dist, fg, bg, unknown, markers,
+                dist, fg, bg, unknown, markers_copy,
                 cards
             )
         
         return cards
-            
+    
     def _detect_battles_from_cards(self, cards: List[Card]):
         """Detect battles by checking if opposing team cards are close to each other"""
         
@@ -254,14 +251,14 @@ class CardDetector:
                         new_battles.append(battle)
     
     def _are_cards_in_battle(self, card1: Card, card2: Card) -> bool:
-        """Check if two cards are close enough to be in battle (20% buffer)"""
+        """Check if two cards are close enough to be in battle (10% buffer)"""
         bbox1 = self._box_to_bbox(card1.box)
         bbox2 = self._box_to_bbox(card2.box)
         
         x1, y1, w1, h1 = bbox1
         x2, y2, w2, h2 = bbox2
         
-        # Calculate buffer (20% of card size)
+        # Calculate buffer
         buffer1 = max(w1, h1) * self.params.battle_proximity_buffer
         buffer2 = max(w2, h2) * self.params.battle_proximity_buffer
         
@@ -318,7 +315,7 @@ class CardDetector:
                 battle.bbox = self._create_battle_bbox(card1, card2)
                 battle.box = self._bbox_to_box(battle.bbox)
                 
-                # Check if each card is still in the ORIGINAL battle zone
+                # Check if each card is still in the original battle zone
                 card1_still_in = self._is_card_in_battle_zone(card1, battle)
                 card2_still_in = self._is_card_in_battle_zone(card2, battle)
                 
